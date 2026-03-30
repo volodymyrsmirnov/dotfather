@@ -3,6 +3,7 @@ package git
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -222,9 +223,31 @@ func CheckoutTheirs(ctx context.Context, dir, path string) error {
 }
 
 // RebaseContinue continues a rebase in progress.
+// Sets GIT_EDITOR=true to prevent editor prompts and disables commit signing
+// to match the behavior of Commit().
 func RebaseContinue(ctx context.Context, dir string) error {
-	_, err := run(ctx, dir, "rebase", "--continue")
-	return err
+	cmd := exec.CommandContext(ctx, "git", "-c", "commit.gpgsign=false", "rebase", "--continue")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_EDITOR=true")
+
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		exitCode := 1
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		}
+		return &GitError{
+			Command:  "rebase",
+			Args:     []string{"-c", "commit.gpgsign=false", "rebase", "--continue"},
+			Stderr:   stderr.String(),
+			ExitCode: exitCode,
+		}
+	}
+	return nil
 }
 
 // RebaseAbort aborts a rebase in progress.

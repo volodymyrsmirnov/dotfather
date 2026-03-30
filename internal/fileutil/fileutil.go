@@ -19,8 +19,11 @@ func AtomicWriteFile(path string, perm os.FileMode, fn func(w io.Writer) error) 
 		return fmt.Errorf("create parent dirs: %w", err)
 	}
 
+	// Use O_EXCL to prevent following symlinks at the temp path (security).
+	// Remove any stale temp file from a previous interrupted run first.
 	tmp := path + ".dotfather-tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+	_ = os.Remove(tmp)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_EXCL, perm)
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}

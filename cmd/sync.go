@@ -80,6 +80,17 @@ func runSync(ctx context.Context, c *cli.Command) error {
 		if stashErr != nil {
 			return fmt.Errorf("git stash: %w", stashErr)
 		}
+		// Ensure stashed changes are restored on any exit path.
+		defer func() {
+			if stashed {
+				if popErr := git.StashPop(ctx, r.Path()); popErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: git stash pop failed: %v\n", popErr)
+					fmt.Fprintf(os.Stderr, "  Your changes are still in the stash. Run: git -C %s stash pop\n",
+						pathutil.TildePath(r.Path()))
+				}
+				stashed = false
+			}
+		}()
 
 		// Snapshot .age file hashes and detect local plaintext edits before pull.
 		preHashes := hashAgeFiles(r)
@@ -124,13 +135,15 @@ func runSync(ctx context.Context, c *cli.Command) error {
 			fmt.Fprintf(os.Stderr, "Warning: decrypt after pull: %v\n", err)
 		}
 
-		// Restore stashed changes.
+		// Restore stashed changes (done by defer, mark as handled here to
+		// ensure pop happens before commit/push rather than at function exit).
 		if stashed {
 			if err := git.StashPop(ctx, r.Path()); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: git stash pop failed: %v\n", err)
 				fmt.Fprintf(os.Stderr, "  Your changes are still in the stash. Run: git -C %s stash pop\n",
 					pathutil.TildePath(r.Path()))
 			}
+			stashed = false
 		}
 	} else {
 		fmt.Println("No remote configured. Use 'git -C " + pathutil.TildePath(r.Path()) + " remote add origin <url>' to set one.")
@@ -430,7 +443,9 @@ func reencryptChangedFiles(r *repo.Repo) error {
 
 			decrypted, err := crypto.DecryptToBytes(r.Path(), encFile)
 			if err != nil {
-				return nil // Can't decrypt — skip.
+				fmt.Fprintf(os.Stderr, "Warning: could not decrypt %s for comparison, skipping re-encrypt: %v\n",
+					pathutil.TildePath(targetPath), err)
+				return nil
 			}
 
 			if targetHash != fileutil.BytesHash(decrypted) {

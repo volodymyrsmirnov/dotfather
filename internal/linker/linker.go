@@ -114,9 +114,14 @@ func CopyFile(src, dst string) error {
 	_, copyErr := io.Copy(dstFile, srcFile)
 	closeErr := dstFile.Close()
 	if copyErr != nil {
+		_ = os.Remove(dst)
 		return copyErr
 	}
-	return closeErr
+	if closeErr != nil {
+		_ = os.Remove(dst)
+		return closeErr
+	}
+	return nil
 }
 
 // CleanEmptyDirs removes empty parent directories from path up to (but not including) root.

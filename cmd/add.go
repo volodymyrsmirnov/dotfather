@@ -295,6 +295,17 @@ func addPath(ctx context.Context, r *repo.Repo, path string, keep, force bool) e
 		if err != nil {
 			return fmt.Errorf("follow symlink: %w", err)
 		}
+		// Re-validate resolved path is under home directory and not inside repo.
+		underHome, err = pathutil.IsUnderHome(realPath)
+		if err != nil {
+			return err
+		}
+		if !underHome {
+			return fmt.Errorf("symlink resolves outside home directory")
+		}
+		if pathutil.IsUnderPath(realPath, r.Path()) {
+			return fmt.Errorf("symlink resolves inside the dotfather repo")
+		}
 		// Copy the real file to a temp location, then atomically replace the symlink.
 		tmpFile := absPath + ".dotfather-tmp"
 		if err := linker.CopyFile(realPath, tmpFile); err != nil {

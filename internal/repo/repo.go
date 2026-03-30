@@ -119,7 +119,7 @@ func (r *Repo) ManagedFiles() ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() && d.Name() == ".git" && path == filepath.Join(r.path, ".git") {
+		if d.IsDir() && d.Name() == ".git" {
 			return filepath.SkipDir
 		}
 		if !d.IsDir() {

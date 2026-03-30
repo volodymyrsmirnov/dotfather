@@ -190,6 +190,7 @@ func loadRecipients(repoPath string) ([]age.Recipient, error) {
 			recipients = append(recipients, r)
 			continue
 		}
+		return nil, fmt.Errorf("invalid recipient in %s: %q", RecipientFile, l)
 	}
 
 	if len(recipients) == 0 {

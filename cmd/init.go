@@ -115,10 +115,12 @@ func initFromClone(ctx context.Context, r *repo.Repo, url string) error {
 		}
 	}
 
-	// Ensure .gitignore exists.
+	// Ensure .gitignore exists and is staged.
 	if _, err := os.Stat(filepath.Join(r.Path(), ".gitignore")); os.IsNotExist(err) {
 		if err := r.WriteGitignore(); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not write .gitignore: %v\n", err)
+		} else if err := git.Add(ctx, r.Path(), ".gitignore"); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not stage .gitignore: %v\n", err)
 		}
 	}
 

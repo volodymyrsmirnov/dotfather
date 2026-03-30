@@ -138,13 +138,16 @@ func addEncryptedPath(ctx context.Context, r *repo.Repo, path string) error {
 		if err != nil {
 			return fmt.Errorf("follow symlink: %w", err)
 		}
-		// Re-validate resolved path is under home directory.
+		// Re-validate resolved path is under home directory and not inside repo.
 		underHome, err = pathutil.IsUnderHome(absPath)
 		if err != nil {
 			return err
 		}
 		if !underHome {
 			return fmt.Errorf("symlink resolves outside home directory")
+		}
+		if pathutil.IsUnderPath(absPath, r.Path()) {
+			return fmt.Errorf("symlink resolves inside the dotfather repo")
 		}
 	}
 
@@ -182,15 +185,11 @@ func convertToEncrypted(ctx context.Context, r *repo.Repo, absPath, repoPath str
 	encRelPath := crypto.EncryptedPath(relPath)
 	encRepoPath := filepath.Join(r.Path(), encRelPath)
 
-	// Copy repo file to a temp location, then replace the symlink atomically.
-	// This avoids a crash window where neither the symlink nor the file exists.
+	// Copy repo file to a temp location, then atomically replace the symlink.
+	// On Unix, rename(2) atomically replaces any existing name (including symlinks).
 	tmpFile := absPath + ".dotfather-tmp"
 	if err := linker.CopyFile(repoPath, tmpFile); err != nil {
 		return fmt.Errorf("copy to temp: %w", err)
-	}
-	if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
-		_ = os.Remove(tmpFile)
-		return fmt.Errorf("remove symlink: %w", err)
 	}
 	if err := os.Rename(tmpFile, absPath); err != nil {
 		_ = os.Remove(tmpFile)
@@ -289,13 +288,14 @@ func addPath(ctx context.Context, r *repo.Repo, path string, keep, force bool) e
 		if err != nil {
 			return fmt.Errorf("follow symlink: %w", err)
 		}
-		// Remove the existing symlink first, then treat the real file as source.
-		if err := os.Remove(absPath); err != nil {
-			return fmt.Errorf("remove existing symlink: %w", err)
-		}
-		// Copy the real file to where the symlink was, then proceed normally.
-		if err := linker.CopyFile(realPath, absPath); err != nil {
+		// Copy the real file to a temp location, then atomically replace the symlink.
+		tmpFile := absPath + ".dotfather-tmp"
+		if err := linker.CopyFile(realPath, tmpFile); err != nil {
 			return fmt.Errorf("copy real file: %w", err)
+		}
+		if err := os.Rename(tmpFile, absPath); err != nil {
+			_ = os.Remove(tmpFile)
+			return fmt.Errorf("replace symlink: %w", err)
 		}
 		fmt.Printf("Resolved existing symlink at %s\n", pathutil.TildePath(absPath))
 	}

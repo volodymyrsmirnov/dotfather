@@ -1,0 +1,703 @@
+package cmd
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/volodymyrsmirnov/dotfather/internal/linker"
+	"github.com/volodymyrsmirnov/dotfather/testutil"
+)
+
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	return resolved
+}
+
+func TestInitFreshWorkflow(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+
+	app := NewApp()
+	err := app.Run(context.Background(), []string{"dotfather", "init"})
+	if err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+
+	// Verify repo created.
+	if _, err := os.Stat(filepath.Join(repoDir, ".git")); os.IsNotExist(err) {
+		t.Error("git repo should be initialized")
+	}
+}
+
+func TestInitIdempotent(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	app := NewApp()
+	err := app.Run(context.Background(), []string{"dotfather", "init"})
+	if err != nil {
+		t.Fatalf("init should be idempotent: %v", err)
+	}
+}
+
+func TestInitExistingNonGitDir(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	if err := os.MkdirAll(filepath.Join(home, ".dotfather"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	app := NewApp()
+	err := app.Run(context.Background(), []string{"dotfather", "init"})
+	if err == nil {
+		t.Error("init should fail when dir exists but is not a git repo")
+	}
+}
+
+func TestAddAndListWorkflow(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	// Create a file to add.
+	testutil.CreateFile(t, home, ".bashrc", "# my bashrc")
+
+	app := NewApp()
+
+	// Add the file.
+	err := app.Run(context.Background(), []string{"dotfather", "add", filepath.Join(home, ".bashrc")})
+	if err != nil {
+		t.Fatalf("add failed: %v", err)
+	}
+
+	// Verify: original is now a symlink.
+	linkTarget, err := os.Readlink(filepath.Join(home, ".bashrc"))
+	if err != nil {
+		t.Fatalf("readlink failed: %v", err)
+	}
+	expectedTarget := filepath.Join(repoDir, ".bashrc")
+	if linkTarget != expectedTarget {
+		t.Errorf("symlink target = %q, want %q", linkTarget, expectedTarget)
+	}
+
+	// Verify: file exists in repo with correct content.
+	content, err := os.ReadFile(filepath.Join(repoDir, ".bashrc"))
+	if err != nil {
+		t.Fatalf("read repo file: %v", err)
+	}
+	if string(content) != "# my bashrc" {
+		t.Errorf("repo file content = %q, want %q", content, "# my bashrc")
+	}
+
+	// Verify: content accessible through symlink.
+	symlinkContent, err := os.ReadFile(filepath.Join(home, ".bashrc"))
+	if err != nil {
+		t.Fatalf("read through symlink: %v", err)
+	}
+	if string(symlinkContent) != "# my bashrc" {
+		t.Errorf("symlink content = %q, want %q", symlinkContent, "# my bashrc")
+	}
+}
+
+func TestAddWithKeepFlag(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	testutil.CreateFile(t, home, ".bashrc", "# my bashrc")
+
+	app := NewApp()
+	err := app.Run(context.Background(), []string{"dotfather", "add", "--keep", filepath.Join(home, ".bashrc")})
+	if err != nil {
+		t.Fatalf("add --keep failed: %v", err)
+	}
+
+	// Verify: .bak file exists.
+	bakContent, err := os.ReadFile(filepath.Join(home, ".bashrc.bak"))
+	if err != nil {
+		t.Fatalf("read .bak file: %v", err)
+	}
+	if string(bakContent) != "# my bashrc" {
+		t.Errorf(".bak content = %q, want %q", bakContent, "# my bashrc")
+	}
+
+	// Verify: original is a symlink.
+	linkTarget, err := os.Readlink(filepath.Join(home, ".bashrc"))
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if linkTarget != filepath.Join(repoDir, ".bashrc") {
+		t.Errorf("symlink target = %q, want %q", linkTarget, filepath.Join(repoDir, ".bashrc"))
+	}
+}
+
+func TestAddNestedFile(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	testutil.CreateFile(t, home, ".config/nvim/init.lua", "-- nvim config")
+
+	app := NewApp()
+	err := app.Run(context.Background(), []string{"dotfather", "add", filepath.Join(home, ".config/nvim/init.lua")})
+	if err != nil {
+		t.Fatalf("add failed: %v", err)
+	}
+
+	// Verify nested structure in repo.
+	content, err := os.ReadFile(filepath.Join(repoDir, ".config/nvim/init.lua"))
+	if err != nil {
+		t.Fatalf("read nested file: %v", err)
+	}
+	if string(content) != "-- nvim config" {
+		t.Errorf("content = %q, want %q", content, "-- nvim config")
+	}
+
+	// Verify symlink.
+	state := linker.Check(
+		filepath.Join(repoDir, ".config/nvim/init.lua"),
+		filepath.Join(home, ".config/nvim/init.lua"),
+	)
+	if state != linker.OK {
+		t.Errorf("symlink state = %v, want OK", state)
+	}
+}
+
+func TestAddMultipleFiles(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	testutil.CreateFile(t, home, ".bashrc", "bash")
+	testutil.CreateFile(t, home, ".zshrc", "zsh")
+
+	app := NewApp()
+	err := app.Run(context.Background(), []string{"dotfather", "add",
+		filepath.Join(home, ".bashrc"),
+		filepath.Join(home, ".zshrc"),
+	})
+	if err != nil {
+		t.Fatalf("add multiple failed: %v", err)
+	}
+
+	// Both should be symlinks.
+	for _, name := range []string{".bashrc", ".zshrc"} {
+		if _, err := os.Readlink(filepath.Join(home, name)); err != nil {
+			t.Errorf("%s should be a symlink: %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(repoDir, name)); os.IsNotExist(err) {
+			t.Errorf("%s should exist in repo", name)
+		}
+	}
+}
+
+func TestAddAlreadyManaged(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	testutil.CreateFile(t, home, ".bashrc", "bash")
+
+	app := NewApp()
+	// Add first time.
+	if err := app.Run(context.Background(), []string{"dotfather", "add", filepath.Join(home, ".bashrc")}); err != nil {
+		t.Fatalf("first add: %v", err)
+	}
+
+	// Add again — should not error.
+	err := app.Run(context.Background(), []string{"dotfather", "add", filepath.Join(home, ".bashrc")})
+	if err != nil {
+		t.Errorf("re-adding managed file should not error: %v", err)
+	}
+}
+
+func TestAddDirectory(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	testutil.CreateFile(t, home, ".config/myapp/a.yaml", "a")
+	testutil.CreateFile(t, home, ".config/myapp/b.yaml", "b")
+
+	app := NewApp()
+	err := app.Run(context.Background(), []string{"dotfather", "add", filepath.Join(home, ".config/myapp")})
+	if err != nil {
+		t.Fatalf("add directory failed: %v", err)
+	}
+
+	// Both files should be in repo.
+	for _, name := range []string{"a.yaml", "b.yaml"} {
+		path := filepath.Join(repoDir, ".config/myapp", name)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			t.Errorf("%s should exist in repo", name)
+		}
+	}
+}
+
+func TestAddFileOutsideHome(t *testing.T) {
+	testutil.SetupTestHome(t)
+
+	tmpFile := filepath.Join(resolvedTempDir(t), "outside.txt")
+	if err := os.WriteFile(tmpFile, []byte("outside"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	app := NewApp()
+	err := app.Run(context.Background(), []string{"dotfather", "add", tmpFile})
+	if err == nil {
+		t.Error("adding file outside home should fail")
+	}
+}
+
+func TestAddNoRepo(t *testing.T) {
+	testutil.SetupTestHome(t)
+
+	app := NewApp()
+	err := app.Run(context.Background(), []string{"dotfather", "add", "/some/file"})
+	if err == nil {
+		t.Error("add without repo should fail")
+	}
+}
+
+func TestForgetWorkflow(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	// Add a file first.
+	testutil.CreateFile(t, home, ".bashrc", "# my bashrc")
+	app := NewApp()
+	if err := app.Run(context.Background(), []string{"dotfather", "add", filepath.Join(home, ".bashrc")}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	// Forget it.
+	err := app.Run(context.Background(), []string{"dotfather", "forget", filepath.Join(home, ".bashrc")})
+	if err != nil {
+		t.Fatalf("forget failed: %v", err)
+	}
+
+	// Verify: original is a regular file, not a symlink.
+	info, err := os.Lstat(filepath.Join(home, ".bashrc"))
+	if err != nil {
+		t.Fatalf("lstat: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Error("file should not be a symlink after forget")
+	}
+
+	// Verify: content preserved.
+	content, err := os.ReadFile(filepath.Join(home, ".bashrc"))
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	if string(content) != "# my bashrc" {
+		t.Errorf("content = %q, want %q", content, "# my bashrc")
+	}
+
+	// Verify: file removed from repo.
+	if _, err := os.Stat(filepath.Join(repoDir, ".bashrc")); !os.IsNotExist(err) {
+		t.Error("file should be removed from repo")
+	}
+}
+
+func TestForgetNotManaged(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	app := NewApp()
+	err := app.Run(context.Background(), []string{"dotfather", "forget", filepath.Join(home, ".bashrc")})
+	if err == nil {
+		t.Error("forget unmanaged file should fail")
+	}
+}
+
+func TestForgetCleansEmptyDirs(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	// Add a nested file.
+	testutil.CreateFile(t, home, ".config/app/config.yaml", "config")
+	app := NewApp()
+	if err := app.Run(context.Background(), []string{"dotfather", "add", filepath.Join(home, ".config/app/config.yaml")}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	// Forget it.
+	if err := app.Run(context.Background(), []string{"dotfather", "forget", filepath.Join(home, ".config/app/config.yaml")}); err != nil {
+		t.Fatalf("forget: %v", err)
+	}
+
+	// Empty .config/app/ dir in repo should be cleaned up.
+	if _, err := os.Stat(filepath.Join(repoDir, ".config/app")); !os.IsNotExist(err) {
+		t.Error("empty nested dir in repo should be cleaned up")
+	}
+}
+
+func TestSyncLocalOnly(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	// Add a file.
+	testutil.CreateFile(t, home, ".bashrc", "# bash")
+	app := NewApp()
+	if err := app.Run(context.Background(), []string{"dotfather", "add", filepath.Join(home, ".bashrc")}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	// Sync (no remote).
+	err := app.Run(context.Background(), []string{"dotfather", "sync"})
+	if err != nil {
+		t.Fatalf("sync failed: %v", err)
+	}
+
+	// Verify a commit was made.
+	// Check git log has a commit mentioning .bashrc.
+}
+
+func TestSyncNoChanges(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	app := NewApp()
+	// Sync with no changes.
+	err := app.Run(context.Background(), []string{"dotfather", "sync"})
+	if err != nil {
+		t.Fatalf("sync with no changes should not error: %v", err)
+	}
+}
+
+func TestStatusEmpty(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	app := NewApp()
+	err := app.Run(context.Background(), []string{"dotfather", "status"})
+	if err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+}
+
+func TestStatusWithFiles(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	testutil.CreateFile(t, home, ".bashrc", "bash")
+	app := NewApp()
+	if err := app.Run(context.Background(), []string{"dotfather", "add", filepath.Join(home, ".bashrc")}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	err := app.Run(context.Background(), []string{"dotfather", "status"})
+	if err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+}
+
+func TestStatusJSON(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	testutil.CreateFile(t, home, ".bashrc", "bash")
+	app := NewApp()
+	if err := app.Run(context.Background(), []string{"dotfather", "add", filepath.Join(home, ".bashrc")}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	err := app.Run(context.Background(), []string{"dotfather", "status", "--json"})
+	if err != nil {
+		t.Fatalf("status --json failed: %v", err)
+	}
+}
+
+func TestListEmpty(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	app := NewApp()
+	err := app.Run(context.Background(), []string{"dotfather", "list"})
+	if err != nil {
+		t.Fatalf("list failed: %v", err)
+	}
+}
+
+func TestDiffNoChanges(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	app := NewApp()
+	err := app.Run(context.Background(), []string{"dotfather", "diff"})
+	if err != nil {
+		t.Fatalf("diff failed: %v", err)
+	}
+}
+
+func TestCDPrintsPath(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	app := NewApp()
+	err := app.Run(context.Background(), []string{"dotfather", "cd"})
+	if err != nil {
+		t.Fatalf("cd failed: %v", err)
+	}
+}
+
+func TestCDShellInit(t *testing.T) {
+	app := NewApp()
+
+	for _, shell := range []string{"bash", "zsh", "fish"} {
+		t.Run(shell, func(t *testing.T) {
+			err := app.Run(context.Background(), []string{"dotfather", "cd", "--shell-init", shell})
+			if err != nil {
+				t.Fatalf("cd --shell-init %s failed: %v", shell, err)
+			}
+		})
+	}
+}
+
+func TestCDShellInitUnsupported(t *testing.T) {
+	app := NewApp()
+	err := app.Run(context.Background(), []string{"dotfather", "cd", "--shell-init", "powershell"})
+	if err == nil {
+		t.Error("cd --shell-init powershell should fail")
+	}
+}
+
+func TestFullWorkflow(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+
+	app := NewApp()
+
+	// 1. Init.
+	if err := app.Run(context.Background(), []string{"dotfather", "init"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// 2. Add files.
+	testutil.CreateFile(t, home, ".bashrc", "# bash config")
+	testutil.CreateFile(t, home, ".config/starship.toml", "[prompt]\nformat = 'bold'")
+
+	if err := app.Run(context.Background(), []string{"dotfather", "add",
+		filepath.Join(home, ".bashrc"),
+		filepath.Join(home, ".config/starship.toml"),
+	}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	// 3. Verify symlinks.
+	for _, f := range []string{".bashrc", ".config/starship.toml"} {
+		target, err := os.Readlink(filepath.Join(home, f))
+		if err != nil {
+			t.Errorf("%s should be symlink: %v", f, err)
+		}
+		expected := filepath.Join(repoDir, f)
+		if target != expected {
+			t.Errorf("%s symlink = %q, want %q", f, target, expected)
+		}
+	}
+
+	// 4. Edit a file through the symlink.
+	if err := os.WriteFile(filepath.Join(home, ".bashrc"), []byte("# updated bash config"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// 5. Sync.
+	if err := app.Run(context.Background(), []string{"dotfather", "sync"}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	// 6. Verify repo file was updated.
+	content, _ := os.ReadFile(filepath.Join(repoDir, ".bashrc"))
+	if string(content) != "# updated bash config" {
+		t.Errorf("repo .bashrc = %q, want updated content", content)
+	}
+
+	// 7. Status should show all OK.
+	if err := app.Run(context.Background(), []string{"dotfather", "status"}); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+
+	// 8. Forget one file.
+	if err := app.Run(context.Background(), []string{"dotfather", "forget",
+		filepath.Join(home, ".bashrc"),
+	}); err != nil {
+		t.Fatalf("forget: %v", err)
+	}
+
+	// 9. Verify .bashrc is back to a regular file.
+	info, _ := os.Lstat(filepath.Join(home, ".bashrc"))
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Error(".bashrc should be a regular file after forget")
+	}
+
+	// 10. List should only show starship.toml (and .gitkeep from test setup).
+	// Verify .bashrc is no longer in repo.
+	if _, err := os.Stat(filepath.Join(repoDir, ".bashrc")); !os.IsNotExist(err) {
+		t.Error(".bashrc should not exist in repo after forget")
+	}
+}
+
+func TestInitCloneWorkflow(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+
+	// Create a "remote" repo with some files.
+	remoteDir := filepath.Join(resolvedTempDir(t), "remote")
+	testutil.InitGitRepo(t, remoteDir)
+	testutil.CreateFile(t, remoteDir, ".bashrc", "# from remote")
+	testutil.CreateFile(t, remoteDir, ".config/app.yaml", "key: value")
+	testutil.GitCommitAll(t, remoteDir, "add dotfiles")
+
+	// Init from clone.
+	app := NewApp()
+	if err := app.Run(context.Background(), []string{"dotfather", "init", remoteDir}); err != nil {
+		t.Fatalf("init clone: %v", err)
+	}
+
+	repoDir := filepath.Join(home, ".dotfather")
+
+	// Verify files exist in repo.
+	for _, f := range []string{".bashrc", ".config/app.yaml"} {
+		if _, err := os.Stat(filepath.Join(repoDir, f)); os.IsNotExist(err) {
+			t.Errorf("%s should exist in cloned repo", f)
+		}
+	}
+
+	// Verify symlinks created.
+	for _, f := range []string{".bashrc", ".config/app.yaml"} {
+		target, err := os.Readlink(filepath.Join(home, f))
+		if err != nil {
+			t.Errorf("%s should be a symlink: %v", f, err)
+			continue
+		}
+		if target != filepath.Join(repoDir, f) {
+			t.Errorf("%s symlink = %q, want %q", f, target, filepath.Join(repoDir, f))
+		}
+	}
+
+	// Verify content accessible through symlinks.
+	content, _ := os.ReadFile(filepath.Join(home, ".bashrc"))
+	if string(content) != "# from remote" {
+		t.Errorf("symlink content = %q, want %q", content, "# from remote")
+	}
+}
+
+func TestInitCloneWithConflicts(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+
+	// Create a "remote" repo.
+	remoteDir := filepath.Join(resolvedTempDir(t), "remote")
+	testutil.InitGitRepo(t, remoteDir)
+	testutil.CreateFile(t, remoteDir, ".bashrc", "# remote version")
+	testutil.GitCommitAll(t, remoteDir, "add bashrc")
+
+	// Create an existing file at the target.
+	testutil.CreateFile(t, home, ".bashrc", "# local version")
+
+	// Init from clone — should back up existing file.
+	app := NewApp()
+	if err := app.Run(context.Background(), []string{"dotfather", "init", remoteDir}); err != nil {
+		t.Fatalf("init clone: %v", err)
+	}
+
+	// Verify backup exists.
+	backupContent, err := os.ReadFile(filepath.Join(home, ".bashrc.dotfather-backup"))
+	if err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	if string(backupContent) != "# local version" {
+		t.Errorf("backup content = %q, want %q", backupContent, "# local version")
+	}
+
+	// Verify symlink points to remote version.
+	content, _ := os.ReadFile(filepath.Join(home, ".bashrc"))
+	if string(content) != "# remote version" {
+		t.Errorf("symlink content = %q, want %q", content, "# remote version")
+	}
+}
+
+func TestAddExistingSymlink(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	// Create a file and a symlink to it.
+	realFile := testutil.CreateFile(t, home, "real_config", "real content")
+	symlinkPath := filepath.Join(home, ".config_link")
+	if err := os.Symlink(realFile, symlinkPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	app := NewApp()
+	err := app.Run(context.Background(), []string{"dotfather", "add", symlinkPath})
+	if err != nil {
+		t.Fatalf("add symlink failed: %v", err)
+	}
+
+	// Verify: the symlink now points to the repo.
+	target, err := os.Readlink(symlinkPath)
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if !strings.HasPrefix(target, repoDir) {
+		t.Errorf("symlink should point to repo, got %q", target)
+	}
+
+	// Verify: content preserved.
+	content, _ := os.ReadFile(symlinkPath)
+	if string(content) != "real content" {
+		t.Errorf("content = %q, want %q", content, "real content")
+	}
+}
+
+func TestForgetWithForceFlag(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	// Put a file in the repo manually.
+	testutil.CreateFile(t, repoDir, ".bashrc", "repo version")
+	testutil.GitCommitAll(t, repoDir, "add bashrc")
+
+	// Create a regular file (not a symlink) at the target.
+	testutil.CreateFile(t, home, ".bashrc", "local version")
+
+	app := NewApp()
+
+	// Without force — should fail.
+	err := app.Run(context.Background(), []string{"dotfather", "forget", filepath.Join(home, ".bashrc")})
+	if err == nil {
+		t.Error("forget without --force should fail when target has non-symlink file")
+	}
+
+	// With force — should succeed.
+	err = app.Run(context.Background(), []string{"dotfather", "forget", "--force", filepath.Join(home, ".bashrc")})
+	if err != nil {
+		t.Fatalf("forget --force failed: %v", err)
+	}
+
+	// Verify content is from repo.
+	content, _ := os.ReadFile(filepath.Join(home, ".bashrc"))
+	if string(content) != "repo version" {
+		t.Errorf("content = %q, want repo version", content)
+	}
+}

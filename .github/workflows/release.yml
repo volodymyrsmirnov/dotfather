@@ -1,0 +1,169 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "**.go"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
+      - ".github/workflows/release.yml"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine next version
+        id: bump
+        run: |
+          latest=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          if [ -z "$latest" ]; then
+            next="v0.1.0"
+          else
+            major=$(echo "$latest" | cut -d. -f1)
+            minor=$(echo "$latest" | cut -d. -f2)
+            patch=$(echo "$latest" | cut -d. -f3)
+            next="${major}.${minor}.$((patch + 1))"
+          fi
+          echo "tag=$next" >> "$GITHUB_OUTPUT"
+          echo "Next version: $next"
+
+  build:
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            artifact: dotfather-linux-amd64
+          - goos: linux
+            goarch: arm64
+            artifact: dotfather-linux-arm64
+          - goos: darwin
+            goarch: amd64
+            artifact: dotfather-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            artifact: dotfather-darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -ldflags "-s -w \
+            -X github.com/volodymyrsmirnov/dotfather/internal/version.Version=${{ needs.version.outputs.tag }} \
+            -X github.com/volodymyrsmirnov/dotfather/internal/version.Commit=$(git rev-parse --short HEAD) \
+            -X github.com/volodymyrsmirnov/dotfather/internal/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o ${{ matrix.artifact }} .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  universal:
+    needs: [version, build]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dotfather-darwin-amd64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dotfather-darwin-arm64
+
+      - name: Create universal binary
+        run: |
+          chmod +x dotfather-darwin-amd64 dotfather-darwin-arm64
+          lipo -create -output dotfather-osx-universal dotfather-darwin-amd64 dotfather-darwin-arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dotfather-osx-universal
+          path: dotfather-osx-universal
+
+  release:
+    needs: [version, build, universal]
+    runs-on: ubuntu-latest
+    outputs:
+      macos_sha256: ${{ steps.checksums.outputs.macos_sha256 }}
+      linux_amd64_sha256: ${{ steps.checksums.outputs.linux_amd64_sha256 }}
+      linux_arm64_sha256: ${{ steps.checksums.outputs.linux_arm64_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dotfather-linux-amd64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dotfather-linux-arm64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dotfather-osx-universal
+
+      - name: Compute checksums
+        id: checksums
+        run: |
+          echo "macos_sha256=$(sha256sum dotfather-osx-universal | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "linux_amd64_sha256=$(sha256sum dotfather-linux-amd64 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "linux_arm64_sha256=$(sha256sum dotfather-linux-arm64 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          chmod +x dotfather-linux-amd64 dotfather-linux-arm64 dotfather-osx-universal
+          gh release create ${{ needs.version.outputs.tag }} \
+            --generate-notes \
+            dotfather-linux-amd64 \
+            dotfather-linux-arm64 \
+            dotfather-osx-universal
+
+  homebrew:
+    needs: [version, release]
+    uses: volodymyrsmirnov/homebrew-tap/.github/workflows/update.yml@main
+    with:
+      type: formula
+      name: dotfather
+      version: ${{ needs.version.outputs.tag }}
+      desc: "Lightweight symlink-based dotfile manager"
+      homepage: "https://github.com/volodymyrsmirnov/dotfather"
+      macos_url: "https://github.com/volodymyrsmirnov/dotfather/releases/download/${{ needs.version.outputs.tag }}/dotfather-osx-universal"
+      macos_sha256: ${{ needs.release.outputs.macos_sha256 }}
+      linux_amd64_url: "https://github.com/volodymyrsmirnov/dotfather/releases/download/${{ needs.version.outputs.tag }}/dotfather-linux-amd64"
+      linux_amd64_sha256: ${{ needs.release.outputs.linux_amd64_sha256 }}
+      linux_arm64_url: "https://github.com/volodymyrsmirnov/dotfather/releases/download/${{ needs.version.outputs.tag }}/dotfather-linux-arm64"
+      linux_arm64_sha256: ${{ needs.release.outputs.linux_arm64_sha256 }}
+      formula_install: |
+        binary = Dir["dotfather-*"].first
+        bin.install binary => "dotfather"
+    secrets:
+      tap_token: ${{ secrets.TAP_GITHUB_TOKEN }}

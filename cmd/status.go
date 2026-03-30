@@ -78,7 +78,6 @@ func runStatus(ctx context.Context, c *cli.Command) error {
 	g, _ := errgroup.WithContext(ctx)
 
 	for i, relPath := range files {
-		i, relPath := i, relPath
 		g.Go(func() error {
 			if crypto.IsEncrypted(relPath) {
 				plaintextRel := crypto.PlaintextPath(relPath)

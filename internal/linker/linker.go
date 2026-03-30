@@ -38,14 +38,6 @@ func (s LinkState) String() string {
 	}
 }
 
-// LinkStatus holds the state of a managed file's symlink.
-type LinkStatus struct {
-	RepoPath   string    // Absolute path in the repo.
-	TargetPath string    // Absolute path where the symlink should be (in ~/).
-	RelPath    string    // Path relative to home (for display).
-	State      LinkState // Current state.
-}
-
 // Link creates a symlink from targetPath to repoFile.
 // It creates parent directories of targetPath as needed.
 func Link(repoFile, targetPath string) error {
@@ -58,20 +50,6 @@ func Link(repoFile, targetPath string) error {
 	}
 
 	return nil
-}
-
-// Unlink removes a symlink at targetPath if it points to repoFile.
-func Unlink(targetPath, repoFile string) error {
-	linkTarget, err := os.Readlink(targetPath)
-	if err != nil {
-		return fmt.Errorf("read symlink: %w", err)
-	}
-
-	if linkTarget != repoFile {
-		return fmt.Errorf("%s is not a dotfather symlink (points to %s)", targetPath, linkTarget)
-	}
-
-	return os.Remove(targetPath)
 }
 
 // Check examines the symlink state for a managed file.
@@ -109,24 +87,6 @@ func Check(repoFile, targetPath string) LinkState {
 // IsOurSymlink returns true if targetPath is a symlink pointing to repoFile.
 func IsOurSymlink(targetPath, repoFile string) bool {
 	return Check(repoFile, targetPath) == OK
-}
-
-// MoveFile moves src to dst, falling back to copy+remove for cross-device moves.
-func MoveFile(src, dst string) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return fmt.Errorf("create parent dirs: %w", err)
-	}
-
-	err := os.Rename(src, dst)
-	if err == nil {
-		return nil
-	}
-
-	// Fallback: copy + remove (cross-device).
-	if err := CopyFile(src, dst); err != nil {
-		return fmt.Errorf("copy %s to %s: %w", src, dst, err)
-	}
-	return os.Remove(src)
 }
 
 // CopyFile copies src to dst, preserving permissions.

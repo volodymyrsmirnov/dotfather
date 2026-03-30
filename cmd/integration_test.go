@@ -1170,7 +1170,8 @@ func TestSyncEncryptedConflictDetection(t *testing.T) {
 	}
 
 	// Detect encrypted conflicts.
-	encConflicts := detectEncryptedConflicts(r, preAgeHashes, localEdits)
+	postAgeHashes := hashAgeFiles(r)
+	encConflicts := detectEncryptedConflicts(r, preAgeHashes, localEdits, postAgeHashes)
 
 	if !encConflicts[".secret.age"] {
 		t.Fatal("expected encrypted conflict for .secret.age")
@@ -1187,7 +1188,7 @@ func TestSyncEncryptedConflictDetection(t *testing.T) {
 	}
 
 	// Decrypt (remote wins).
-	if err := decryptEncryptedFiles(r, encConflicts, preAgeHashes); err != nil {
+	if err := decryptEncryptedFiles(r, encConflicts, preAgeHashes, postAgeHashes); err != nil {
 		t.Fatalf("decryptEncryptedFiles: %v", err)
 	}
 

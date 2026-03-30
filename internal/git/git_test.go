@@ -187,18 +187,6 @@ func TestHasRemote(t *testing.T) {
 	}
 }
 
-func TestRemoteAdd(t *testing.T) {
-	dir := initTestRepo(t)
-
-	if err := RemoteAdd(context.Background(), dir, "origin", "https://example.com/repo.git"); err != nil {
-		t.Fatalf("RemoteAdd() error: %v", err)
-	}
-
-	if !HasRemote(context.Background(), dir) {
-		t.Error("remote should exist after RemoteAdd")
-	}
-}
-
 func TestDiff(t *testing.T) {
 	dir := initTestRepo(t)
 

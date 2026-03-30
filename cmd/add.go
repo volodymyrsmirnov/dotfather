@@ -138,6 +138,14 @@ func addEncryptedPath(ctx context.Context, r *repo.Repo, path string) error {
 		if err != nil {
 			return fmt.Errorf("follow symlink: %w", err)
 		}
+		// Re-validate resolved path is under home directory.
+		underHome, err = pathutil.IsUnderHome(absPath)
+		if err != nil {
+			return err
+		}
+		if !underHome {
+			return fmt.Errorf("symlink resolves outside home directory")
+		}
 	}
 
 	return addEncryptedFile(ctx, r, absPath)

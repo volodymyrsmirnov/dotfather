@@ -182,6 +182,13 @@ func forgetSingleFile(ctx context.Context, r *repo.Repo, absPath string, force b
 		return nil
 	}
 
+	// Copy repo file to a temp location first, then replace the target atomically.
+	// This avoids a window where the target is deleted but the copy hasn't completed.
+	tmpFile := absPath + ".dotfather-tmp"
+	if err := linker.CopyFile(repoFile, tmpFile); err != nil {
+		return fmt.Errorf("restore file: %w", err)
+	}
+
 	// Handle the target location.
 	info, err := os.Lstat(absPath)
 	if err == nil {
@@ -192,13 +199,16 @@ func forgetSingleFile(ctx context.Context, r *repo.Repo, absPath string, force b
 			if linkTarget == repoFile {
 				// Our symlink — remove it.
 				if err := os.Remove(absPath); err != nil {
+					_ = os.Remove(tmpFile)
 					return fmt.Errorf("remove symlink: %w", err)
 				}
 			} else if force {
 				if err := os.Remove(absPath); err != nil {
+					_ = os.Remove(tmpFile)
 					return fmt.Errorf("remove existing symlink: %w", err)
 				}
 			} else {
+				_ = os.Remove(tmpFile)
 				return fmt.Errorf("unexpected symlink at %s (points to %s, not our repo). Use --force to overwrite",
 					pathutil.TildePath(absPath), linkTarget)
 			}
@@ -206,17 +216,20 @@ func forgetSingleFile(ctx context.Context, r *repo.Repo, absPath string, force b
 			// Regular file exists.
 			if force {
 				if err := os.Remove(absPath); err != nil {
+					_ = os.Remove(tmpFile)
 					return fmt.Errorf("remove existing file: %w", err)
 				}
 			} else {
+				_ = os.Remove(tmpFile)
 				return fmt.Errorf("unexpected file at %s (not a dotfather symlink). Use --force to overwrite",
 					pathutil.TildePath(absPath))
 			}
 		}
 	}
 
-	// Copy file from repo to target location.
-	if err := linker.CopyFile(repoFile, absPath); err != nil {
+	// Rename temp file into place.
+	if err := os.Rename(tmpFile, absPath); err != nil {
+		_ = os.Remove(tmpFile)
 		return fmt.Errorf("restore file: %w", err)
 	}
 

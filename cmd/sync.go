@@ -111,7 +111,8 @@ func runSync(ctx context.Context, c *cli.Command) error {
 		}
 
 		// Detect encrypted files that changed on remote while local target has edits.
-		encConflicts := detectEncryptedConflicts(r, preHashes, localEdits)
+		postHashes := hashAgeFiles(r)
+		encConflicts := detectEncryptedConflicts(r, preHashes, localEdits, postHashes)
 
 		// Reconcile symlinks after pull.
 		if err := reconcileSymlinks(r); err != nil {
@@ -119,7 +120,7 @@ func runSync(ctx context.Context, c *cli.Command) error {
 		}
 
 		// Decrypt encrypted files after pull, handling conflicts.
-		if err := decryptEncryptedFiles(r, encConflicts, preHashes); err != nil {
+		if err := decryptEncryptedFiles(r, encConflicts, preHashes, postHashes); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: decrypt after pull: %v\n", err)
 		}
 
@@ -208,6 +209,8 @@ func generateCommitMessage(porcelain string) string {
 		switch {
 		case status == "??" || status[0] == 'A':
 			added = append(added, file)
+		case status[0] == 'R' || status[0] == 'C':
+			modified = append(modified, file)
 		case status[0] == 'M' || status[1] == 'M':
 			modified = append(modified, file)
 		case status[0] == 'D' || status[1] == 'D':
@@ -412,7 +415,6 @@ func reencryptChangedFiles(r *repo.Repo) error {
 			continue
 		}
 
-		relPath := relPath
 		g.Go(func() error {
 			plaintextRel := crypto.PlaintextPath(relPath)
 			targetPath := filepath.Join(home, plaintextRel)
@@ -511,7 +513,7 @@ func detectLocalEdits(r *repo.Repo) map[string]bool {
 // plaintext differs from the decrypted .age content (detected before pull).
 // For each conflict, the local plaintext is saved as a backup so the remote
 // version can be decrypted.
-func detectEncryptedConflicts(r *repo.Repo, preAgeHashes map[string]string, localEdits map[string]bool) map[string]bool {
+func detectEncryptedConflicts(r *repo.Repo, preAgeHashes map[string]string, localEdits map[string]bool, postAgeHashes map[string]string) map[string]bool {
 	if len(preAgeHashes) == 0 {
 		return nil
 	}
@@ -521,7 +523,6 @@ func detectEncryptedConflicts(r *repo.Repo, preAgeHashes map[string]string, loca
 		return nil
 	}
 
-	postAgeHashes := hashAgeFiles(r)
 	conflicts := make(map[string]bool)
 
 	for relPath, postHash := range postAgeHashes {
@@ -558,7 +559,7 @@ func detectEncryptedConflicts(r *repo.Repo, preAgeHashes map[string]string, loca
 // Files in the conflicted set are always decrypted (remote wins, local was backed up).
 // Non-conflicting files are skipped if their .age hash is unchanged from pre-pull
 // (no new content from remote). Uses content hashing instead of mtime for reliability.
-func decryptEncryptedFiles(r *repo.Repo, conflicted map[string]bool, preAgeHashes map[string]string) error {
+func decryptEncryptedFiles(r *repo.Repo, conflicted map[string]bool, preAgeHashes map[string]string, postAgeHashes map[string]string) error {
 	if !crypto.HasIdentity(r.Path()) {
 		return nil
 	}
@@ -572,8 +573,6 @@ func decryptEncryptedFiles(r *repo.Repo, conflicted map[string]bool, preAgeHashe
 	if err != nil {
 		return err
 	}
-
-	postAgeHashes := hashAgeFiles(r)
 
 	var firstErr error
 	for _, relPath := range files {

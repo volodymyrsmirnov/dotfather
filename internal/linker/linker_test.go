@@ -81,42 +81,6 @@ func TestLink_CreatesParentDirs(t *testing.T) {
 	}
 }
 
-func TestUnlink(t *testing.T) {
-	dir := t.TempDir()
-
-	repoFile := filepath.Join(dir, "repo", ".bashrc")
-	targetPath := filepath.Join(dir, "home", ".bashrc")
-
-	setupFile(t, repoFile, "content")
-	setupSymlink(t, repoFile, targetPath)
-
-	// Unlink.
-	if err := Unlink(targetPath, repoFile); err != nil {
-		t.Fatalf("Unlink() error: %v", err)
-	}
-
-	// Verify symlink is gone.
-	_, err := os.Lstat(targetPath)
-	if !os.IsNotExist(err) {
-		t.Error("symlink should be removed")
-	}
-}
-
-func TestUnlink_WrongTarget(t *testing.T) {
-	dir := t.TempDir()
-
-	wrongTarget := filepath.Join(dir, "wrong")
-	setupFile(t, wrongTarget, "wrong")
-
-	targetPath := filepath.Join(dir, "link")
-	setupSymlink(t, wrongTarget, targetPath)
-
-	err := Unlink(targetPath, "/expected/repo/file")
-	if err == nil {
-		t.Fatal("Unlink() should error when symlink points elsewhere")
-	}
-}
-
 func TestCheck(t *testing.T) {
 	dir := t.TempDir()
 
@@ -217,54 +181,6 @@ func TestIsOurSymlink(t *testing.T) {
 
 	if IsOurSymlink(otherTarget, repoFile) {
 		t.Error("IsOurSymlink() should return false for wrong target")
-	}
-}
-
-func TestMoveFile(t *testing.T) {
-	dir := t.TempDir()
-
-	src := filepath.Join(dir, "src", "file")
-	dst := filepath.Join(dir, "dst", "file")
-
-	setupFile(t, src, "content")
-
-	if err := MoveFile(src, dst); err != nil {
-		t.Fatalf("MoveFile() error: %v", err)
-	}
-
-	// Source should be gone.
-	if _, err := os.Stat(src); !os.IsNotExist(err) {
-		t.Error("source file should be removed")
-	}
-
-	// Destination should have the content.
-	content, err := os.ReadFile(dst)
-	if err != nil {
-		t.Fatalf("read dst: %v", err)
-	}
-	if string(content) != "content" {
-		t.Errorf("dst content = %q, want %q", content, "content")
-	}
-}
-
-func TestMoveFile_CreatesParentDirs(t *testing.T) {
-	dir := t.TempDir()
-
-	src := filepath.Join(dir, "file")
-	dst := filepath.Join(dir, "a", "b", "c", "file")
-
-	setupFile(t, src, "data")
-
-	if err := MoveFile(src, dst); err != nil {
-		t.Fatalf("MoveFile() error: %v", err)
-	}
-
-	content, err := os.ReadFile(dst)
-	if err != nil {
-		t.Fatalf("read dst: %v", err)
-	}
-	if string(content) != "data" {
-		t.Errorf("content = %q, want %q", content, "data")
 	}
 }
 

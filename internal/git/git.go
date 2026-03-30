@@ -172,12 +172,6 @@ func RemoteGetURL(ctx context.Context, dir string) (string, error) {
 	return run(ctx, dir, "remote", "get-url", "origin")
 }
 
-// RemoteAdd adds a remote.
-func RemoteAdd(ctx context.Context, dir, name, url string) error {
-	_, err := run(ctx, dir, "remote", "add", name, url)
-	return err
-}
-
 // CurrentBranch returns the current branch name.
 func CurrentBranch(ctx context.Context, dir string) (string, error) {
 	out, err := run(ctx, dir, "symbolic-ref", "--short", "HEAD")
@@ -280,6 +274,9 @@ func AheadBehind(ctx context.Context, dir string) (ahead, behind int, err error)
 	if err != nil {
 		return 0, 0, err
 	}
-	_, _ = fmt.Sscanf(strings.TrimSpace(out), "%d\t%d", &ahead, &behind)
+	n, scanErr := fmt.Sscanf(strings.TrimSpace(out), "%d\t%d", &ahead, &behind)
+	if n != 2 || scanErr != nil {
+		return 0, 0, fmt.Errorf("parse ahead/behind: unexpected output %q", strings.TrimSpace(out))
+	}
 	return ahead, behind, nil
 }

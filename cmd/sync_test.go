@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -55,7 +56,7 @@ func TestGenerateCommitMessage_ManyFiles(t *testing.T) {
 		t.Errorf("message too long: %q", msg)
 	}
 	// Should contain the count.
-	if !contains(msg, "4 dotfiles") {
+	if !strings.Contains(msg, "4 dotfiles") {
 		t.Errorf("expected '4 dotfiles' in message, got %q", msg)
 	}
 }
@@ -104,15 +105,3 @@ func TestShellescape(t *testing.T) {
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStr(s, substr))
-}
-
-func containsStr(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}

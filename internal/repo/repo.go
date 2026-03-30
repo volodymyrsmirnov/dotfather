@@ -43,6 +43,14 @@ func New() (*Repo, error) {
 		dir = filepath.Join(home, defaultDirName)
 	}
 
+	if dir != "" && !filepath.IsAbs(dir) {
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			return nil, fmt.Errorf("resolve DOTFATHER_DIR: %w", err)
+		}
+		dir = abs
+	}
+
 	r := &Repo{path: dir}
 	r.loadIgnoreFile()
 	return r, nil
@@ -83,6 +91,11 @@ func (r *Repo) IsMetaFile(relPath string) bool {
 	return r.extraMetaFiles[relPath]
 }
 
+// ReloadIgnoreFile re-reads the .dotfather-ignore file, e.g. after a clone.
+func (r *Repo) ReloadIgnoreFile() {
+	r.loadIgnoreFile()
+}
+
 func (r *Repo) loadIgnoreFile() {
 	data, err := os.ReadFile(filepath.Join(r.path, ".dotfather-ignore"))
 	if err != nil {
@@ -106,7 +119,7 @@ func (r *Repo) ManagedFiles() ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() && d.Name() == ".git" {
+		if d.IsDir() && d.Name() == ".git" && path == filepath.Join(r.path, ".git") {
 			return filepath.SkipDir
 		}
 		if !d.IsDir() {
@@ -196,7 +209,8 @@ func (r *Repo) TargetPathFor(relPath string) (string, error) {
 	return filepath.Join(home, relPath), nil
 }
 
-// IsManaged checks if a file (by absolute path) is already managed.
+// IsManaged checks if a file (by absolute path) is already managed,
+// including encrypted (.age) variants.
 func (r *Repo) IsManaged(absPath string) (bool, error) {
 	repoPath, err := r.RepoPathFor(absPath)
 	if err != nil {
@@ -204,6 +218,15 @@ func (r *Repo) IsManaged(absPath string) (bool, error) {
 	}
 
 	_, err = os.Stat(repoPath)
+	if err == nil {
+		return true, nil
+	}
+	if !os.IsNotExist(err) {
+		return false, err
+	}
+
+	// Check encrypted variant.
+	_, err = os.Stat(repoPath + crypto.EncryptedExt)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil

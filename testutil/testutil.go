@@ -35,16 +35,6 @@ func CreateFile(t *testing.T, base, relPath, content string) string {
 	return absPath
 }
 
-// CreateExecutableFile creates a file with executable permissions.
-func CreateExecutableFile(t *testing.T, base, relPath, content string) string {
-	t.Helper()
-	absPath := CreateFile(t, base, relPath, content)
-	if err := os.Chmod(absPath, 0755); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	return absPath
-}
-
 // InitGitRepo initializes a git repo with an initial commit.
 func InitGitRepo(t *testing.T, dir string) {
 	t.Helper()

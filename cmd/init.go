@@ -122,6 +122,9 @@ func initFromClone(ctx context.Context, r *repo.Repo, url string) error {
 		}
 	}
 
+	// Reload ignore file now that the cloned repo is available.
+	r.ReloadIgnoreFile()
+
 	files, err := r.ManagedFiles()
 	if err != nil {
 		return fmt.Errorf("list files: %w", err)

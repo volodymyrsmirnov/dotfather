@@ -2,7 +2,7 @@
 
 Lightweight symlink-based dotfile manager. Like chezmoi, but without the complexity.
 
-dotfather uses a simple approach: your dotfiles live in a git repository (`~/.dotfather/`), and their original locations become symlinks pointing into that repo. One command to sync everything.
+dotfather uses a simple approach: your dotfiles live in a git repository (`~/.dotfather/`), and their original locations become symlinks pointing into that repo. Sensitive files can be encrypted with [age](https://github.com/FiloSottile/age). One command to sync everything.
 
 ## Install
 
@@ -45,6 +45,10 @@ dotfather add ~/.config/starship.toml
 # Add an entire directory
 dotfather add ~/.config/kitty
 
+# Add sensitive files as encrypted
+dotfather add --encrypt ~/.ssh/id_rsa
+dotfather add --encrypt ~/.config/secrets/
+
 # Check status
 dotfather status
 
@@ -60,43 +64,42 @@ dotfather forget ~/.bashrc
 dotfather mirrors your home directory structure inside `~/.dotfather/`:
 
 ```
-~/.dotfather/              <- git repo
-├── .bashrc                <- real file (git-tracked)
+~/.dotfather/                      <- git repo
+├── README.md                      <- auto-generated setup instructions
+├── .gitignore                     <- excludes age identity key
+├── .age-recipients                <- age public key (committed)
+├── .age-identity                  <- age private key (gitignored)
+├── .bashrc                        <- real file (git-tracked)
 ├── .config/
 │   ├── nvim/
 │   │   └── init.lua
 │   └── starship.toml
 └── .ssh/
-    └── config
+    ├── config
+    └── id_rsa.age                 <- encrypted file (git-tracked)
 
-~/                         <- your home directory
-├── .bashrc        -> ~/.dotfather/.bashrc          (symlink)
+~/                                 <- your home directory
+├── .bashrc       -> ~/.dotfather/.bashrc             (symlink)
 ├── .config/
 │   ├── nvim/
 │   │   └── init.lua -> ~/.dotfather/.config/nvim/init.lua
 │   └── starship.toml -> ~/.dotfather/.config/starship.toml
 └── .ssh/
-    └── config     -> ~/.dotfather/.ssh/config
+    ├── config    -> ~/.dotfather/.ssh/config          (symlink)
+    └── id_rsa                                         (decrypted copy)
 ```
+
+**Regular files** are symlinked — edits go directly to the repo.
+**Encrypted files** (`.age`) are decrypted copies — re-encrypted automatically on `sync`.
+**Meta files** (`README.md`, `.gitignore`, `.age-recipients`, `.age-identity`) stay in the repo only and are never symlinked.
 
 No manifest files, no templates, no encoding. The directory structure IS the configuration.
-
-Encrypted files (added with `--encrypt`) are stored as `.age` files and decrypted on sync:
-```
-~/.dotfather/
-└── .ssh/
-    └── id_rsa.age      <- encrypted (git-tracked)
-
-~/
-└── .ssh/
-    └── id_rsa          <- decrypted copy (not a symlink)
-```
 
 ## Commands
 
 ### `dotfather init [url]`
 
-Initialize a new dotfather repository.
+Initialize a new dotfather repository. Generates an age keypair, creates a README.md with setup instructions, and sets up `.gitignore`.
 
 ```bash
 # Empty repo
@@ -106,7 +109,7 @@ dotfather init
 dotfather init git@github.com:yourname/dotfiles.git
 ```
 
-When cloning, existing files at target locations are backed up as `<file>.dotfather-backup`.
+When cloning, existing files at target locations are backed up as `<file>.dotfather-backup`. Encrypted files are decrypted automatically if the age identity key is present.
 
 ### `dotfather add <path> [path...]`
 
@@ -127,14 +130,15 @@ dotfather add --encrypt ~/.config/secrets/
 | Flag | Description |
 |------|-------------|
 | `--keep`, `-k` | Keep a `.bak` copy of the original file |
-| `--encrypt`, `-e` | Encrypt with age (stored as `.age`, copied not symlinked) |
+| `--encrypt`, `-e` | Encrypt with age (stored as `.age`, original stays in place) |
 
 ### `dotfather forget <path> [path...]`
 
-Remove files from dotfather management. Copies the file back to its original location and removes it from the repo.
+Remove files from dotfather management. Copies the file back to its original location and removes it from the repo. Works for both regular and encrypted files.
 
 ```bash
 dotfather forget ~/.bashrc
+dotfather forget ~/.ssh/id_rsa     # removes .ssh/id_rsa.age from repo
 
 # Overwrite existing non-symlink files at target
 dotfather forget --force ~/.bashrc
@@ -147,6 +151,8 @@ dotfather forget --force ~/.bashrc
 ### `dotfather sync`
 
 Pull remote changes, commit local changes with auto-generated messages, and push.
+
+For encrypted files: re-encrypts any targets that were modified locally before committing, then decrypts any updated `.age` files after pulling.
 
 ```bash
 dotfather sync
@@ -166,7 +172,7 @@ Auto-generated commit messages:
 When merge conflicts occur, you're prompted for each file:
 - `l` — Accept local version
 - `r` — Accept remote version
-- `m` — Open in `$EDITOR` for manual merge
+- `m` — Open in `$EDITOR` for manual merge (supports editors with flags like `zed --wait`)
 
 | Flag | Description |
 |------|-------------|
@@ -182,15 +188,16 @@ dotfather status
 # Output:
 #   ~/.bashrc                OK
 #   ~/.config/nvim/init.lua  OK
+#   ~/.ssh/id_rsa            ENCRYPTED
 #   ~/.config/old.yaml       BROKEN
 #
-# 3 files managed, 2 ok, 1 broken
+# 4 files managed, 3 ok, 1 broken
 
 # JSON output for scripting
 dotfather status --json
 ```
 
-States: `OK`, `BROKEN`, `MISSING`, `UNLINKED`, `CONFLICT`
+States: `OK`, `BROKEN`, `MISSING`, `UNLINKED`, `CONFLICT`, `ENCRYPTED`, `ENCRYPTED (missing)`
 
 | Flag | Description |
 |------|-------------|
@@ -198,11 +205,15 @@ States: `OK`, `BROKEN`, `MISSING`, `UNLINKED`, `CONFLICT`
 
 ### `dotfather list`
 
-List all managed files.
+List all managed files. Encrypted files are shown with `[encrypted]` suffix.
 
 ```bash
-dotfather list        # ~/.bashrc, ~/.config/nvim/init.lua, ...
-dotfather list --paths  # /home/user/.bashrc, /home/user/.config/nvim/init.lua, ...
+dotfather list
+# ~/.bashrc
+# ~/.config/nvim/init.lua
+# ~/.ssh/id_rsa [encrypted]
+
+dotfather list --paths  # absolute paths
 ```
 
 | Flag | Description |
@@ -235,31 +246,46 @@ With shell integration, `dotfather cd` will change your shell's working director
 
 ## Encrypted files
 
-Sensitive files (SSH keys, tokens, etc.) can be encrypted with [age](https://github.com/FiloSottile/age):
+Sensitive files (SSH keys, tokens, API credentials) can be stored encrypted in the repo using [age](https://github.com/FiloSottile/age) encryption. The age library is compiled into the dotfather binary — no external tools needed.
 
 ```bash
-# Add encrypted files
 dotfather add --encrypt ~/.ssh/id_rsa
 dotfather add --encrypt ~/.config/secrets/api_token
-
-# Sync works transparently — re-encrypts changed files, decrypts after pull
-dotfather sync
 ```
 
-Encryption is handled by the built-in age library (no external tools needed). Keys are generated automatically on `dotfather init`:
-- **Public key** (`.age-recipients`): committed to the repo, used for encryption
-- **Private key** (`.age-identity`): gitignored, must be copied manually to new machines
+### How it works
+
+- Encrypted files are stored as `<path>.age` in the repo (e.g., `.ssh/id_rsa.age`)
+- The original file stays in place as a regular file (not a symlink)
+- `dotfather sync` automatically:
+  - **Re-encrypts** local files that changed since the last sync
+  - **Decrypts** files updated from the remote after pulling
+
+### Key management
+
+Keys are generated automatically on `dotfather init`:
+
+| File | Purpose | Git status |
+|------|---------|------------|
+| `.age-recipients` | Public key (used for encryption) | Committed |
+| `.age-identity` | Private key (used for decryption) | Gitignored |
+
+The public key is shared via the repo so any clone can encrypt new files. The private key must be transferred manually to new machines.
 
 ### New machine with encrypted files
 
-After cloning, copy your age identity key from an existing machine:
-
 ```bash
+# 1. Clone dotfiles (regular files are linked, encrypted files are skipped)
+dotfather init git@github.com:yourname/dotfiles.git
+
+# 2. Copy your age identity key from an existing machine
 scp other-machine:~/.dotfather/.age-identity ~/.dotfather/.age-identity
-dotfather sync  # decrypts all encrypted files
+
+# 3. Decrypt encrypted files
+dotfather sync
 ```
 
-> **Tip**: Install the `age` CLI (`brew install age`) if you want to manually inspect encrypted files outside of dotfather.
+> **Tip**: Install the `age` CLI (`brew install age`) if you want to manually inspect or decrypt files outside of dotfather.
 
 ## New machine setup
 

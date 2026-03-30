@@ -222,6 +222,28 @@ func RebaseAbort(ctx context.Context, dir string) error {
 	return err
 }
 
+// HasCommits returns true if the repository has at least one commit.
+func HasCommits(ctx context.Context, dir string) bool {
+	_, err := run(ctx, dir, "rev-parse", "HEAD")
+	return err == nil
+}
+
+// Stash stashes all changes (tracked and untracked). Returns true if anything was stashed.
+func Stash(ctx context.Context, dir string) (bool, error) {
+	out, err := run(ctx, dir, "stash", "push", "--include-untracked", "-m", "dotfather-sync-autostash")
+	if err != nil {
+		return false, err
+	}
+	// "No local changes to save" means nothing was stashed.
+	return !strings.Contains(out, "No local changes"), nil
+}
+
+// StashPop pops the most recent stash entry.
+func StashPop(ctx context.Context, dir string) error {
+	_, err := run(ctx, dir, "stash", "pop")
+	return err
+}
+
 // IsGitRepo checks if the directory is a git repository.
 func IsGitRepo(ctx context.Context, dir string) bool {
 	_, err := run(ctx, dir, "rev-parse", "--git-dir")

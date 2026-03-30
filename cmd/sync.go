@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/volodymyrsmirnov/dotfather/internal/crypto"
+	"github.com/volodymyrsmirnov/dotfather/internal/fileutil"
 	"github.com/volodymyrsmirnov/dotfather/internal/git"
 	"github.com/volodymyrsmirnov/dotfather/internal/linker"
 	"github.com/volodymyrsmirnov/dotfather/internal/lock"
@@ -61,6 +62,27 @@ func runSync(ctx context.Context, c *cli.Command) error {
 			return fmt.Errorf("detect branch: %w", err)
 		}
 
+		// If the branch has no commits yet (unborn), commit staged changes
+		// first so pull --rebase can work.
+		if !git.HasCommits(ctx, r.Path()) {
+			if err := git.AddAll(ctx, r.Path()); err != nil {
+				return fmt.Errorf("git add: %w", err)
+			}
+			if err := git.Commit(ctx, r.Path(), "Initialize dotfather repository"); err != nil {
+				return fmt.Errorf("initial commit: %w", err)
+			}
+			fmt.Println("Created initial commit.")
+		}
+
+		// Stash local changes so pull --rebase can proceed.
+		stashed, stashErr := git.Stash(ctx, r.Path())
+		if stashErr != nil {
+			return fmt.Errorf("git stash: %w", stashErr)
+		}
+
+		// Snapshot .age file hashes before pull for conflict detection.
+		preHashes := hashAgeFiles(r)
+
 		fmt.Printf("Pulling from origin/%s...\n", branch)
 		_, pullErr := git.Pull(ctx, r.Path(), branch)
 
@@ -86,14 +108,26 @@ func runSync(ctx context.Context, c *cli.Command) error {
 			}
 		}
 
+		// Detect encrypted files that changed on remote while local target has edits.
+		encConflicts := detectEncryptedConflicts(r, preHashes)
+
 		// Reconcile symlinks after pull.
 		if err := reconcileSymlinks(r); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: symlink reconciliation: %v\n", err)
 		}
 
-		// Decrypt encrypted files after pull.
-		if err := decryptEncryptedFiles(r); err != nil {
+		// Decrypt encrypted files after pull, handling conflicts.
+		if err := decryptEncryptedFiles(r, encConflicts); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: decrypt after pull: %v\n", err)
+		}
+
+		// Restore stashed changes.
+		if stashed {
+			if err := git.StashPop(ctx, r.Path()); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: git stash pop failed: %v\n", err)
+				fmt.Fprintf(os.Stderr, "  Your changes are still in the stash. Run: git -C %s stash pop\n",
+					pathutil.TildePath(r.Path()))
+			}
 		}
 	} else {
 		fmt.Println("No remote configured. Use 'git -C " + pathutil.TildePath(r.Path()) + " remote add origin <url>' to set one.")
@@ -402,8 +436,87 @@ func reencryptChangedFiles(r *repo.Repo) error {
 	return g.Wait()
 }
 
+// hashAgeFiles computes SHA-256 hashes of all .age files in the repo.
+func hashAgeFiles(r *repo.Repo) map[string]string {
+	files, err := r.ManagedFiles()
+	if err != nil {
+		return nil
+	}
+	hashes := make(map[string]string)
+	for _, relPath := range files {
+		if !crypto.IsEncrypted(relPath) {
+			continue
+		}
+		absPath := filepath.Join(r.Path(), relPath)
+		h, err := fileutil.FileHash(absPath)
+		if err != nil {
+			continue
+		}
+		hashes[relPath] = h
+	}
+	return hashes
+}
+
+// detectEncryptedConflicts finds .age files that changed on remote while the
+// local plaintext target has been modified. For each conflict, the local
+// plaintext is saved as a backup so the remote version can be decrypted.
+func detectEncryptedConflicts(r *repo.Repo, preHashes map[string]string) map[string]bool {
+	if len(preHashes) == 0 {
+		return nil
+	}
+
+	home, err := pathutil.HomeDir()
+	if err != nil {
+		return nil
+	}
+
+	postHashes := hashAgeFiles(r)
+	conflicts := make(map[string]bool)
+
+	for relPath, postHash := range postHashes {
+		preHash, existed := preHashes[relPath]
+		if !existed || preHash == postHash {
+			continue // new file or unchanged on remote
+		}
+
+		// Remote changed this .age file. Check if local target has edits.
+		plaintextRel := crypto.PlaintextPath(relPath)
+		targetPath := filepath.Join(home, plaintextRel)
+
+		targetInfo, err := os.Stat(targetPath)
+		if err != nil {
+			continue // no local target
+		}
+		encFile := filepath.Join(r.Path(), relPath)
+		encInfo, err := os.Stat(encFile)
+		if err != nil {
+			continue
+		}
+
+		// If local target is newer than the (post-pull) .age file's old mtime,
+		// there are local edits that would conflict.
+		if targetInfo.ModTime().After(encInfo.ModTime()) {
+			// Save local version before remote overwrites it.
+			backupPath := targetPath + ".dotfather-local"
+			if cpErr := linker.CopyFile(targetPath, backupPath); cpErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: could not save local version of %s: %v\n",
+					pathutil.TildePath(targetPath), cpErr)
+			} else {
+				fmt.Fprintf(os.Stderr, "Conflict: %s changed both locally and remotely\n", relPath)
+				fmt.Fprintf(os.Stderr, "  Local edits saved to %s\n", pathutil.TildePath(backupPath))
+				fmt.Fprintf(os.Stderr, "  Remote version will be decrypted\n")
+			}
+			conflicts[relPath] = true
+		}
+	}
+
+	return conflicts
+}
+
 // decryptEncryptedFiles decrypts all .age files in the repo to their target paths.
-func decryptEncryptedFiles(r *repo.Repo) error {
+// Files in the conflicted set bypass the "skip if newer" check so the remote
+// version is decrypted even when local edits exist (they were already backed up).
+func decryptEncryptedFiles(r *repo.Repo, conflicted map[string]bool) error {
 	if !crypto.HasIdentity(r.Path()) {
 		return nil
 	}
@@ -428,12 +541,14 @@ func decryptEncryptedFiles(r *repo.Repo) error {
 		targetPath := filepath.Join(home, plaintextRel)
 		encFile := filepath.Join(r.Path(), relPath)
 
-		// Skip if target is newer than the encrypted file (local edits).
-		// reencryptChangedFiles will handle re-encrypting these later.
-		if targetInfo, err := os.Stat(targetPath); err == nil {
-			encInfo, encErr := os.Stat(encFile)
-			if encErr == nil && targetInfo.ModTime().After(encInfo.ModTime()) {
-				continue
+		// For conflicting files, always decrypt (remote wins, local was backed up).
+		// For non-conflicting files, skip if target is newer (local edits).
+		if !conflicted[relPath] {
+			if targetInfo, err := os.Stat(targetPath); err == nil {
+				encInfo, encErr := os.Stat(encFile)
+				if encErr == nil && targetInfo.ModTime().After(encInfo.ModTime()) {
+					continue
+				}
 			}
 		}
 

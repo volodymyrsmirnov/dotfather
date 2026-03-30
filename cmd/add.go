@@ -189,6 +189,12 @@ func convertToEncrypted(ctx context.Context, r *repo.Repo, absPath, repoPath str
 	// If the target is a regular file (UNLINKED state), use its content directly
 	// to preserve user edits.
 	state := linker.Check(repoPath, absPath)
+	switch state {
+	case linker.Conflict:
+		return fmt.Errorf("symlink at %s points to a different file, not our repo copy", pathutil.TildePath(absPath))
+	case linker.Inaccessible:
+		return fmt.Errorf("cannot access %s to convert to encrypted", pathutil.TildePath(absPath))
+	}
 	if state == linker.OK || state == linker.Missing || state == linker.Broken {
 		tmpFile := absPath + ".dotfather-tmp"
 		if err := linker.CopyFile(repoPath, tmpFile); err != nil {

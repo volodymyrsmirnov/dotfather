@@ -179,7 +179,10 @@ func runSync(ctx context.Context, c *cli.Command) error {
 
 	// Push if remote configured.
 	if hasRemote {
-		branch, _ := git.CurrentBranch(ctx, r.Path())
+		branch, err := git.CurrentBranch(ctx, r.Path())
+		if err != nil {
+			return fmt.Errorf("detect branch for push: %w", err)
+		}
 		fmt.Printf("Pushing to origin/%s...\n", branch)
 		if err := git.Push(ctx, r.Path(), branch); err != nil {
 			return fmt.Errorf("git push failed: %w\nPush manually with: git -C %s push",
@@ -391,9 +394,9 @@ func reconcileSymlinks(r *repo.Repo) error {
 	return nil
 }
 
-// reencryptChangedFiles checks encrypted file targets and re-encrypts if modified.
-// Note: uses mtime comparison which can cause unnecessary re-encryption after pull,
-// but this errs on the side of safety (re-encrypting is idempotent, not data-losing).
+// reencryptChangedFiles checks encrypted file targets and re-encrypts if the
+// target content differs from the decrypted .age content. Uses content-based
+// comparison (hash) instead of mtime to avoid spurious re-encryption after pull.
 func reencryptChangedFiles(r *repo.Repo) error {
 	if !crypto.HasRecipient(r.Path()) || !crypto.HasIdentity(r.Path()) {
 		return nil
@@ -420,17 +423,17 @@ func reencryptChangedFiles(r *repo.Repo) error {
 			targetPath := filepath.Join(home, plaintextRel)
 			encFile := filepath.Join(r.Path(), relPath)
 
-			targetInfo, err := os.Stat(targetPath)
+			targetHash, err := fileutil.FileHash(targetPath)
 			if err != nil {
 				return nil // Target doesn't exist — nothing to re-encrypt.
 			}
 
-			encInfo, err := os.Stat(encFile)
+			decrypted, err := crypto.DecryptToBytes(r.Path(), encFile)
 			if err != nil {
-				return nil
+				return nil // Can't decrypt — skip.
 			}
 
-			if targetInfo.ModTime().After(encInfo.ModTime()) {
+			if targetHash != fileutil.BytesHash(decrypted) {
 				if err := crypto.EncryptFile(r.Path(), targetPath, encFile); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: could not re-encrypt %s: %v\n",
 						pathutil.TildePath(targetPath), err)

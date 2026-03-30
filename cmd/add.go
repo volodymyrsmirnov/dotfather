@@ -185,18 +185,25 @@ func convertToEncrypted(ctx context.Context, r *repo.Repo, absPath, repoPath str
 	encRelPath := crypto.EncryptedPath(relPath)
 	encRepoPath := filepath.Join(r.Path(), encRelPath)
 
-	// Copy repo file to a temp location, then atomically replace the symlink.
-	// On Unix, rename(2) atomically replaces any existing name (including symlinks).
-	tmpFile := absPath + ".dotfather-tmp"
-	if err := linker.CopyFile(repoPath, tmpFile); err != nil {
-		return fmt.Errorf("copy to temp: %w", err)
-	}
-	if err := os.Rename(tmpFile, absPath); err != nil {
-		_ = os.Remove(tmpFile)
-		return fmt.Errorf("rename temp to target: %w", err)
+	// Only replace the target with repo content when it's our symlink or missing.
+	// If the target is a regular file (UNLINKED state), use its content directly
+	// to preserve user edits.
+	state := linker.Check(repoPath, absPath)
+	if state == linker.OK || state == linker.Missing || state == linker.Broken {
+		tmpFile := absPath + ".dotfather-tmp"
+		if err := linker.CopyFile(repoPath, tmpFile); err != nil {
+			return fmt.Errorf("copy to temp: %w", err)
+		}
+		if state == linker.Broken {
+			_ = os.Remove(absPath)
+		}
+		if err := os.Rename(tmpFile, absPath); err != nil {
+			_ = os.Remove(tmpFile)
+			return fmt.Errorf("rename temp to target: %w", err)
+		}
 	}
 
-	// Encrypt the file.
+	// Encrypt the file (from target path, which has the most current content).
 	if err := crypto.EncryptFile(r.Path(), absPath, encRepoPath); err != nil {
 		return fmt.Errorf("encrypt: %w", err)
 	}

@@ -241,12 +241,20 @@ func HasCommits(ctx context.Context, dir string) bool {
 
 // Stash stashes all changes (tracked and untracked). Returns true if anything was stashed.
 func Stash(ctx context.Context, dir string) (bool, error) {
-	out, err := run(ctx, dir, "stash", "push", "--include-untracked", "-m", "dotfather-sync-autostash")
+	// Check for changes before stashing to avoid parsing locale-dependent
+	// git output (the "No local changes to save" message is localized).
+	hasChanges, err := HasUncommitted(ctx, dir)
 	if err != nil {
 		return false, err
 	}
-	// "No local changes to save" means nothing was stashed.
-	return !strings.Contains(out, "No local changes"), nil
+	if !hasChanges {
+		return false, nil
+	}
+	_, err = run(ctx, dir, "stash", "push", "--include-untracked", "-m", "dotfather-sync-autostash")
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // StashPop pops the most recent stash entry.

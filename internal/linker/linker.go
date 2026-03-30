@@ -12,11 +12,11 @@ type LinkState int
 
 const (
 	OK           LinkState = iota // Symlink exists and points to repo file.
-	Broken                       // Symlink exists but target is missing.
-	Missing                      // No symlink and no file at target.
-	Unlinked                     // Regular file exists at target (not a symlink to repo).
-	Conflict                     // Symlink exists but points somewhere else.
-	Inaccessible                 // Cannot stat target (permission error).
+	Broken                        // Symlink exists but target is missing.
+	Missing                       // No symlink and no file at target.
+	Unlinked                      // Regular file exists at target (not a symlink to repo).
+	Conflict                      // Symlink exists but points somewhere else.
+	Inaccessible                  // Cannot stat target (permission error).
 )
 
 func (s LinkState) String() string {

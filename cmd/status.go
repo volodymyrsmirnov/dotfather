@@ -38,8 +38,8 @@ type fileStatus struct {
 }
 
 type statusOutput struct {
-	Files       []fileStatus `json:"files"`
-	Total       int          `json:"total"`
+	Files        []fileStatus `json:"files"`
+	Total        int          `json:"total"`
 	OK           int          `json:"ok"`
 	Encrypted    int          `json:"encrypted"`
 	Broken       int          `json:"broken"`
@@ -47,9 +47,9 @@ type statusOutput struct {
 	Unlinked     int          `json:"unlinked"`
 	Conflict     int          `json:"conflict"`
 	Inaccessible int          `json:"inaccessible,omitempty"`
-	Uncommitted bool         `json:"uncommitted"`
-	Ahead       int          `json:"ahead,omitempty"`
-	Behind      int          `json:"behind,omitempty"`
+	Uncommitted  bool         `json:"uncommitted"`
+	Ahead        int          `json:"ahead,omitempty"`
+	Behind       int          `json:"behind,omitempty"`
 }
 
 func runStatus(ctx context.Context, c *cli.Command) error {

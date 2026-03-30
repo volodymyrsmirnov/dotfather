@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	cli "github.com/urfave/cli/v3"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/volodymyrsmirnov/dotfather/internal/crypto"
 	"github.com/volodymyrsmirnov/dotfather/internal/git"
@@ -40,6 +41,7 @@ type statusOutput struct {
 	Files       []fileStatus `json:"files"`
 	Total       int          `json:"total"`
 	OK          int          `json:"ok"`
+	Encrypted   int          `json:"encrypted"`
 	Broken      int          `json:"broken"`
 	Missing     int          `json:"missing"`
 	Unlinked    int          `json:"unlinked"`
@@ -49,7 +51,7 @@ type statusOutput struct {
 	Behind      int          `json:"behind,omitempty"`
 }
 
-func runStatus(_ context.Context, c *cli.Command) error {
+func runStatus(ctx context.Context, c *cli.Command) error {
 	r, err := repo.New()
 	if err != nil {
 		return err
@@ -70,73 +72,69 @@ func runStatus(_ context.Context, c *cli.Command) error {
 
 	asJSON := c.Bool("json")
 
-	output := statusOutput{}
-	var statuses []linker.LinkStatus
+	// Check file statuses in parallel (stat operations are I/O bound).
+	results := make([]fileStatus, len(files))
+	g, _ := errgroup.WithContext(ctx)
 
-	for _, relPath := range files {
-		// Handle encrypted files differently.
-		if crypto.IsEncrypted(relPath) {
-			plaintextRel := crypto.PlaintextPath(relPath)
-			targetPath := filepath.Join(home, plaintextRel)
-			displayPath := pathutil.TildePath(targetPath)
-
-			stateStr := "ENCRYPTED"
-			if _, err := os.Stat(targetPath); os.IsNotExist(err) {
-				stateStr = "ENCRYPTED (missing)"
+	for i, relPath := range files {
+		i, relPath := i, relPath
+		g.Go(func() error {
+			if crypto.IsEncrypted(relPath) {
+				plaintextRel := crypto.PlaintextPath(relPath)
+				targetPath := filepath.Join(home, plaintextRel)
+				stateStr := "ENCRYPTED"
+				if _, err := os.Stat(targetPath); os.IsNotExist(err) {
+					stateStr = "ENCRYPTED (missing)"
+				}
+				results[i] = fileStatus{
+					Path:  pathutil.TildePath(targetPath),
+					State: stateStr,
+				}
+				return nil
 			}
 
-			statuses = append(statuses, linker.LinkStatus{
-				RepoPath:   filepath.Join(r.Path(), relPath),
-				TargetPath: targetPath,
-				RelPath:    plaintextRel,
-				State:      linker.OK, // Count as OK for summary.
-			})
-			output.Files = append(output.Files, fileStatus{
-				Path:  displayPath,
-				State: stateStr,
-			})
-			output.Total++
-			output.OK++
-			continue
-		}
-
-		repoFile := filepath.Join(r.Path(), relPath)
-		targetPath := filepath.Join(home, relPath)
-
-		state := linker.Check(repoFile, targetPath)
-		statuses = append(statuses, linker.LinkStatus{
-			RepoPath:   repoFile,
-			TargetPath: targetPath,
-			RelPath:    relPath,
-			State:      state,
+			repoFile := filepath.Join(r.Path(), relPath)
+			targetPath := filepath.Join(home, relPath)
+			state := linker.Check(repoFile, targetPath)
+			results[i] = fileStatus{
+				Path:  pathutil.TildePath(targetPath),
+				State: state.String(),
+			}
+			return nil
 		})
+	}
 
-		output.Files = append(output.Files, fileStatus{
-			Path:  pathutil.TildePath(targetPath),
-			State: state.String(),
-		})
+	if err := g.Wait(); err != nil {
+		return err
+	}
 
+	// Collect results and compute counters.
+	output := statusOutput{}
+	for _, f := range results {
+		output.Files = append(output.Files, f)
 		output.Total++
-		switch state {
-		case linker.OK:
+		switch f.State {
+		case linker.OK.String():
 			output.OK++
-		case linker.Broken:
+		case linker.Broken.String():
 			output.Broken++
-		case linker.Missing:
+		case linker.Missing.String():
 			output.Missing++
-		case linker.Unlinked:
+		case linker.Unlinked.String():
 			output.Unlinked++
-		case linker.Conflict:
+		case linker.Conflict.String():
 			output.Conflict++
+		case "ENCRYPTED", "ENCRYPTED (missing)":
+			output.Encrypted++
 		}
 	}
 
 	// Git status.
-	uncommitted, _ := git.HasUncommitted(r.Path())
+	uncommitted, _ := git.HasUncommitted(ctx, r.Path())
 	output.Uncommitted = uncommitted
 
-	if git.HasRemote(r.Path()) {
-		ahead, behind, err := git.AheadBehind(r.Path())
+	if git.HasRemote(ctx, r.Path()) {
+		ahead, behind, err := git.AheadBehind(ctx, r.Path())
 		if err == nil {
 			output.Ahead = ahead
 			output.Behind = behind
@@ -150,24 +148,21 @@ func runStatus(_ context.Context, c *cli.Command) error {
 	}
 
 	// Text output.
-	if len(statuses) == 0 {
+	if len(output.Files) == 0 {
 		fmt.Println("No managed files.")
 		return nil
 	}
 
 	// Find max path length for alignment.
 	maxLen := 0
-	for _, s := range statuses {
-		tilde := pathutil.TildePath(s.TargetPath)
-		if len(tilde) > maxLen {
-			maxLen = len(tilde)
+	for _, f := range output.Files {
+		if len(f.Path) > maxLen {
+			maxLen = len(f.Path)
 		}
 	}
 
-	for _, s := range statuses {
-		tilde := pathutil.TildePath(s.TargetPath)
-		stateStr := s.State.String()
-		fmt.Printf("  %-*s  %s\n", maxLen, tilde, stateStr)
+	for _, f := range output.Files {
+		fmt.Printf("  %-*s  %s\n", maxLen, f.Path, f.State)
 	}
 
 	fmt.Println()
@@ -176,6 +171,9 @@ func runStatus(_ context.Context, c *cli.Command) error {
 	summary := fmt.Sprintf("%d files managed", output.Total)
 	if output.OK > 0 {
 		summary += fmt.Sprintf(", %d ok", output.OK)
+	}
+	if output.Encrypted > 0 {
+		summary += fmt.Sprintf(", %d encrypted", output.Encrypted)
 	}
 	if output.Broken > 0 {
 		summary += fmt.Sprintf(", %d broken", output.Broken)

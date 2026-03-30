@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/volodymyrsmirnov/dotfather/internal/crypto"
 	"github.com/volodymyrsmirnov/dotfather/internal/linker"
 	"github.com/volodymyrsmirnov/dotfather/testutil"
 )
@@ -257,6 +258,24 @@ func TestAddFileOutsideHome(t *testing.T) {
 	}
 }
 
+func TestForgetOutsideHome(t *testing.T) {
+	testutil.SetupTestHome(t)
+
+	app := NewApp()
+	_ = app.Run(context.Background(), []string{"dotfather", "init"})
+
+	// Create a file outside the test home.
+	tmpFile := filepath.Join(resolvedTempDir(t), "outside.txt")
+	if err := os.WriteFile(tmpFile, []byte("outside"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	err := app.Run(context.Background(), []string{"dotfather", "forget", tmpFile})
+	if err == nil {
+		t.Error("forgetting file outside home should fail")
+	}
+}
+
 func TestAddNoRepo(t *testing.T) {
 	testutil.SetupTestHome(t)
 
@@ -264,6 +283,69 @@ func TestAddNoRepo(t *testing.T) {
 	err := app.Run(context.Background(), []string{"dotfather", "add", "/some/file"})
 	if err == nil {
 		t.Error("add without repo should fail")
+	}
+}
+
+func TestAddFile_UnlinkedRefusesWithoutForce(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	// Add a file to get it managed.
+	bashrc := filepath.Join(home, ".bashrc")
+	testutil.CreateFile(t, home, ".bashrc", "# my bashrc")
+	app := NewApp()
+	if err := app.Run(context.Background(), []string{"dotfather", "add", bashrc}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	// Replace the symlink with a regular file (simulating UNLINKED state).
+	if err := os.Remove(bashrc); err != nil {
+		t.Fatalf("remove symlink: %v", err)
+	}
+	if err := os.WriteFile(bashrc, []byte("local edit"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Re-add without --force should fail.
+	err := app.Run(context.Background(), []string{"dotfather", "add", bashrc})
+	if err == nil {
+		t.Error("re-add of unlinked file without --force should fail")
+	}
+}
+
+func TestAddFile_UnlinkedSucceedsWithForce(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	bashrc := filepath.Join(home, ".bashrc")
+	testutil.CreateFile(t, home, ".bashrc", "# my bashrc")
+	app := NewApp()
+	if err := app.Run(context.Background(), []string{"dotfather", "add", bashrc}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	// Replace symlink with regular file.
+	if err := os.Remove(bashrc); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if err := os.WriteFile(bashrc, []byte("local edit"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Re-add with --force should succeed.
+	if err := app.Run(context.Background(), []string{"dotfather", "add", "--force", bashrc}); err != nil {
+		t.Fatalf("add --force should succeed: %v", err)
+	}
+
+	// Verify it's a symlink again.
+	info, err := os.Lstat(bashrc)
+	if err != nil {
+		t.Fatalf("lstat: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error("file should be a symlink after force re-add")
 	}
 }
 
@@ -699,5 +781,227 @@ func TestForgetWithForceFlag(t *testing.T) {
 	content, _ := os.ReadFile(filepath.Join(home, ".bashrc"))
 	if string(content) != "repo version" {
 		t.Errorf("content = %q, want repo version", content)
+	}
+}
+
+func TestAddRejectsRepoPath(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	// Create a file inside the repo.
+	testutil.CreateFile(t, repoDir, "somefile.txt", "repo internal")
+
+	app := NewApp()
+	err := app.Run(context.Background(), []string{"dotfather", "add", filepath.Join(repoDir, "somefile.txt")})
+	if err == nil {
+		t.Error("add should reject files inside the dotfather repo")
+	}
+}
+
+func TestAddEncryptedRejectsRepoPath(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	if err := crypto.GenerateKey(repoDir); err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	testutil.CreateFile(t, repoDir, "somefile.txt", "repo internal")
+
+	app := NewApp()
+	err := app.Run(context.Background(), []string{"dotfather", "add", "--encrypt", filepath.Join(repoDir, "somefile.txt")})
+	if err == nil {
+		t.Error("add --encrypt should reject files inside the dotfather repo")
+	}
+}
+
+func TestForgetEncrypted_DecryptsIfMissing(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	if err := crypto.GenerateKey(repoDir); err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	// Create a file and add it encrypted.
+	secretPath := filepath.Join(home, ".secret")
+	testutil.CreateFile(t, home, ".secret", "my secret data")
+
+	app := NewApp()
+	if err := app.Run(context.Background(), []string{"dotfather", "add", "--encrypt", secretPath}); err != nil {
+		t.Fatalf("add --encrypt failed: %v", err)
+	}
+
+	// Verify .age file exists in repo.
+	encFile := filepath.Join(repoDir, ".secret.age")
+	if _, err := os.Stat(encFile); err != nil {
+		t.Fatalf("encrypted file should exist: %v", err)
+	}
+
+	// Delete the plaintext target.
+	if err := os.Remove(secretPath); err != nil {
+		t.Fatalf("remove plaintext: %v", err)
+	}
+
+	// Forget should decrypt before removing.
+	if err := app.Run(context.Background(), []string{"dotfather", "forget", secretPath}); err != nil {
+		t.Fatalf("forget failed: %v", err)
+	}
+
+	// Verify plaintext was restored.
+	content, err := os.ReadFile(secretPath)
+	if err != nil {
+		t.Fatalf("plaintext should be restored: %v", err)
+	}
+	if string(content) != "my secret data" {
+		t.Errorf("content = %q, want %q", content, "my secret data")
+	}
+
+	// Verify .age file was removed.
+	if _, err := os.Stat(encFile); !os.IsNotExist(err) {
+		t.Error(".age file should be removed from repo")
+	}
+}
+
+func TestForgetEncrypted_TargetExists(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	if err := crypto.GenerateKey(repoDir); err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	secretPath := filepath.Join(home, ".secret")
+	testutil.CreateFile(t, home, ".secret", "my secret data")
+
+	app := NewApp()
+	if err := app.Run(context.Background(), []string{"dotfather", "add", "--encrypt", secretPath}); err != nil {
+		t.Fatalf("add --encrypt failed: %v", err)
+	}
+
+	// Target still exists — forget should work without decrypting.
+	if err := app.Run(context.Background(), []string{"dotfather", "forget", secretPath}); err != nil {
+		t.Fatalf("forget failed: %v", err)
+	}
+
+	// Verify .age removed.
+	encFile := filepath.Join(repoDir, ".secret.age")
+	if _, err := os.Stat(encFile); !os.IsNotExist(err) {
+		t.Error(".age file should be removed from repo")
+	}
+
+	// Verify plaintext still exists.
+	if _, err := os.Stat(secretPath); err != nil {
+		t.Error("plaintext target should still exist")
+	}
+}
+
+func TestForgetDirectory(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	// Create multiple files under a directory.
+	testutil.CreateFile(t, home, ".config/myapp/config.yaml", "app config")
+	testutil.CreateFile(t, home, ".config/myapp/theme.json", "theme data")
+
+	app := NewApp()
+
+	// Add both files.
+	if err := app.Run(context.Background(), []string{"dotfather", "add", filepath.Join(home, ".config/myapp/config.yaml")}); err != nil {
+		t.Fatalf("add config: %v", err)
+	}
+	if err := app.Run(context.Background(), []string{"dotfather", "add", filepath.Join(home, ".config/myapp/theme.json")}); err != nil {
+		t.Fatalf("add theme: %v", err)
+	}
+
+	// Both should be symlinks now.
+	if linker.Check(filepath.Join(repoDir, ".config/myapp/config.yaml"), filepath.Join(home, ".config/myapp/config.yaml")) != linker.OK {
+		t.Error("config.yaml should be linked")
+	}
+	if linker.Check(filepath.Join(repoDir, ".config/myapp/theme.json"), filepath.Join(home, ".config/myapp/theme.json")) != linker.OK {
+		t.Error("theme.json should be linked")
+	}
+
+	// Forget the directory.
+	if err := app.Run(context.Background(), []string{"dotfather", "forget", filepath.Join(home, ".config/myapp")}); err != nil {
+		t.Fatalf("forget directory failed: %v", err)
+	}
+
+	// Both files should be restored as regular files.
+	for _, name := range []string{"config.yaml", "theme.json"} {
+		fpath := filepath.Join(home, ".config/myapp", name)
+		info, err := os.Lstat(fpath)
+		if err != nil {
+			t.Fatalf("stat %s: %v", name, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			t.Errorf("%s should be a regular file, not a symlink", name)
+		}
+	}
+
+	// Repo should not have those files.
+	if _, err := os.Stat(filepath.Join(repoDir, ".config/myapp/config.yaml")); !os.IsNotExist(err) {
+		t.Error("config.yaml should be removed from repo")
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, ".config/myapp/theme.json")); !os.IsNotExist(err) {
+		t.Error("theme.json should be removed from repo")
+	}
+}
+
+func TestConvertToEncrypted(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	if err := crypto.GenerateKey(repoDir); err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	// Add file normally (creates symlink).
+	testutil.CreateFile(t, home, ".secret", "secret content")
+	app := NewApp()
+
+	if err := app.Run(context.Background(), []string{"dotfather", "add", filepath.Join(home, ".secret")}); err != nil {
+		t.Fatalf("add failed: %v", err)
+	}
+
+	// Verify it's a symlink.
+	if linker.Check(filepath.Join(repoDir, ".secret"), filepath.Join(home, ".secret")) != linker.OK {
+		t.Fatal("should be linked after add")
+	}
+
+	// Re-add with --encrypt to convert.
+	if err := app.Run(context.Background(), []string{"dotfather", "add", "--encrypt", filepath.Join(home, ".secret")}); err != nil {
+		t.Fatalf("add --encrypt (convert) failed: %v", err)
+	}
+
+	// Target should be a regular file, not a symlink.
+	info, err := os.Lstat(filepath.Join(home, ".secret"))
+	if err != nil {
+		t.Fatalf("stat target: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Error("target should be a regular file after conversion, not a symlink")
+	}
+
+	// Content should be preserved.
+	content, _ := os.ReadFile(filepath.Join(home, ".secret"))
+	if string(content) != "secret content" {
+		t.Errorf("content = %q, want %q", content, "secret content")
+	}
+
+	// .age file should exist in repo.
+	if _, err := os.Stat(filepath.Join(repoDir, ".secret.age")); err != nil {
+		t.Error(".age file should exist in repo")
+	}
+
+	// Plain file should NOT exist in repo.
+	if _, err := os.Stat(filepath.Join(repoDir, ".secret")); !os.IsNotExist(err) {
+		t.Error("plain file should be removed from repo after conversion")
 	}
 }

@@ -6,12 +6,14 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	cli "github.com/urfave/cli/v3"
 
 	"github.com/volodymyrsmirnov/dotfather/internal/crypto"
 	"github.com/volodymyrsmirnov/dotfather/internal/git"
 	"github.com/volodymyrsmirnov/dotfather/internal/linker"
+	"github.com/volodymyrsmirnov/dotfather/internal/lock"
 	"github.com/volodymyrsmirnov/dotfather/internal/pathutil"
 	"github.com/volodymyrsmirnov/dotfather/internal/repo"
 )
@@ -32,12 +34,17 @@ func newAddCommand() *cli.Command {
 				Aliases: []string{"e"},
 				Usage:   "Encrypt file with age (stored as .age, copied instead of symlinked)",
 			},
+			&cli.BoolFlag{
+				Name:    "force",
+				Aliases: []string{"f"},
+				Usage:   "Overwrite existing files at target when re-linking",
+			},
 		},
 		Action: runAdd,
 	}
 }
 
-func runAdd(_ context.Context, c *cli.Command) error {
+func runAdd(ctx context.Context, c *cli.Command) error {
 	if c.NArg() == 0 {
 		return fmt.Errorf("at least one path is required")
 	}
@@ -50,8 +57,15 @@ func runAdd(_ context.Context, c *cli.Command) error {
 		return err
 	}
 
+	lk, err := lock.Acquire(r.Path())
+	if err != nil {
+		return err
+	}
+	defer lk.Release()
+
 	keep := c.Bool("keep")
 	encrypt := c.Bool("encrypt")
+	force := c.Bool("force")
 
 	if encrypt && !crypto.HasRecipient(r.Path()) {
 		return fmt.Errorf("no age recipient key found; run 'dotfather init' to generate keys")
@@ -62,12 +76,12 @@ func runAdd(_ context.Context, c *cli.Command) error {
 	for i := 0; i < c.NArg(); i++ {
 		arg := c.Args().Get(i)
 		if encrypt {
-			if err := addEncryptedPath(r, arg); err != nil {
+			if err := addEncryptedPath(ctx, r, arg); err != nil {
 				errors = append(errors, fmt.Errorf("%s: %w", arg, err))
 				fmt.Fprintf(os.Stderr, "Error: %s: %v\n", arg, err)
 			}
 		} else {
-			if err := addPath(r, arg, keep); err != nil {
+			if err := addPath(ctx, r, arg, keep, force); err != nil {
 				errors = append(errors, fmt.Errorf("%s: %w", arg, err))
 				fmt.Fprintf(os.Stderr, "Error: %s: %v\n", arg, err)
 			}
@@ -82,7 +96,7 @@ func runAdd(_ context.Context, c *cli.Command) error {
 }
 
 // addEncryptedPath encrypts a file and stores it as .age in the repo.
-func addEncryptedPath(r *repo.Repo, path string) error {
+func addEncryptedPath(ctx context.Context, r *repo.Repo, path string) error {
 	absPath, err := pathutil.NormalizePath(path)
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
@@ -96,13 +110,25 @@ func addEncryptedPath(r *repo.Repo, path string) error {
 		return fmt.Errorf("only files under your home directory can be managed")
 	}
 
+	if pathutil.IsUnderPath(absPath, r.Path()) {
+		return fmt.Errorf("cannot add files inside the dotfather repo (%s)", pathutil.TildePath(r.Path()))
+	}
+
+	// Check if the file is already managed as a regular (symlinked) file.
+	// If so, convert it to encrypted instead of adding from scratch.
+	if repoPath, err := r.RepoPathFor(absPath); err == nil {
+		if _, err := os.Stat(repoPath); err == nil {
+			return convertToEncrypted(ctx, r, absPath, repoPath)
+		}
+	}
+
 	info, err := os.Lstat(absPath)
 	if err != nil {
 		return fmt.Errorf("file not found: %w", err)
 	}
 
 	if info.IsDir() {
-		return addEncryptedDirectory(r, absPath)
+		return addEncryptedDirectory(ctx, r, absPath)
 	}
 
 	// Follow symlinks to get real file.
@@ -113,10 +139,10 @@ func addEncryptedPath(r *repo.Repo, path string) error {
 		}
 	}
 
-	return addEncryptedFile(r, absPath)
+	return addEncryptedFile(ctx, r, absPath)
 }
 
-func addEncryptedFile(r *repo.Repo, absPath string) error {
+func addEncryptedFile(ctx context.Context, r *repo.Repo, absPath string) error {
 	relPath, err := pathutil.RelToHome(absPath)
 	if err != nil {
 		return err
@@ -131,7 +157,7 @@ func addEncryptedFile(r *repo.Repo, absPath string) error {
 	}
 
 	// Stage in git.
-	if err := git.Add(r.Path(), encRelPath); err != nil {
+	if err := git.Add(ctx, r.Path(), encRelPath); err != nil {
 		return fmt.Errorf("git add: %w", err)
 	}
 
@@ -139,7 +165,53 @@ func addEncryptedFile(r *repo.Repo, absPath string) error {
 	return nil
 }
 
-func addEncryptedDirectory(r *repo.Repo, dirPath string) error {
+func convertToEncrypted(ctx context.Context, r *repo.Repo, absPath, repoPath string) error {
+	relPath, err := pathutil.RelToHome(absPath)
+	if err != nil {
+		return err
+	}
+	encRelPath := crypto.EncryptedPath(relPath)
+	encRepoPath := filepath.Join(r.Path(), encRelPath)
+
+	// Copy repo file to a temp location, then replace the symlink atomically.
+	// This avoids a crash window where neither the symlink nor the file exists.
+	tmpFile := absPath + ".dotfather-tmp"
+	if err := linker.CopyFile(repoPath, tmpFile); err != nil {
+		return fmt.Errorf("copy to temp: %w", err)
+	}
+	if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("remove symlink: %w", err)
+	}
+	if err := os.Rename(tmpFile, absPath); err != nil {
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("rename temp to target: %w", err)
+	}
+
+	// Encrypt the file.
+	if err := crypto.EncryptFile(r.Path(), absPath, encRepoPath); err != nil {
+		return fmt.Errorf("encrypt: %w", err)
+	}
+
+	// Remove unencrypted repo copy.
+	if err := os.Remove(repoPath); err != nil {
+		return fmt.Errorf("remove plaintext from repo: %w", err)
+	}
+	linker.CleanEmptyDirs(repoPath, r.Path())
+
+	// Stage both changes.
+	if err := git.Add(ctx, r.Path(), encRelPath); err != nil {
+		return fmt.Errorf("git add encrypted: %w", err)
+	}
+	if err := git.Add(ctx, r.Path(), relPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not stage removal: %v\n", err)
+	}
+
+	fmt.Printf("Converted %s to encrypted\n", pathutil.TildePath(absPath))
+	return nil
+}
+
+func addEncryptedDirectory(ctx context.Context, r *repo.Repo, dirPath string) error {
 	var errors []error
 
 	err := filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
@@ -147,9 +219,12 @@ func addEncryptedDirectory(r *repo.Repo, dirPath string) error {
 			return err
 		}
 		if d.IsDir() {
+			if pathutil.IsUnderPath(path, r.Path()) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
-		if err := addEncryptedFile(r, path); err != nil {
+		if err := addEncryptedPath(ctx, r, path); err != nil {
 			errors = append(errors, fmt.Errorf("%s: %w", path, err))
 			fmt.Fprintf(os.Stderr, "Error: %s: %v\n", pathutil.TildePath(path), err)
 		}
@@ -165,7 +240,7 @@ func addEncryptedDirectory(r *repo.Repo, dirPath string) error {
 	return nil
 }
 
-func addPath(r *repo.Repo, path string, keep bool) error {
+func addPath(ctx context.Context, r *repo.Repo, path string, keep, force bool) error {
 	absPath, err := pathutil.NormalizePath(path)
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
@@ -179,6 +254,10 @@ func addPath(r *repo.Repo, path string, keep bool) error {
 		return fmt.Errorf("only files under your home directory can be managed")
 	}
 
+	if pathutil.IsUnderPath(absPath, r.Path()) {
+		return fmt.Errorf("cannot add files inside the dotfather repo (%s)", pathutil.TildePath(r.Path()))
+	}
+
 	info, err := os.Lstat(absPath)
 	if err != nil {
 		return fmt.Errorf("file not found: %w", err)
@@ -186,7 +265,7 @@ func addPath(r *repo.Repo, path string, keep bool) error {
 
 	// If it's a directory, recursively add all files.
 	if info.IsDir() {
-		return addDirectory(r, absPath, keep)
+		return addDirectory(ctx, r, absPath, keep, force)
 	}
 
 	// If it's a symlink, check if it's already ours.
@@ -212,10 +291,10 @@ func addPath(r *repo.Repo, path string, keep bool) error {
 		fmt.Printf("Resolved existing symlink at %s\n", pathutil.TildePath(absPath))
 	}
 
-	return addFile(r, absPath, keep)
+	return addFile(ctx, r, absPath, keep, force)
 }
 
-func addFile(r *repo.Repo, absPath string, keep bool) error {
+func addFile(ctx context.Context, r *repo.Repo, absPath string, keep, force bool) error {
 	repoPath, err := r.RepoPathFor(absPath)
 	if err != nil {
 		return err
@@ -223,20 +302,41 @@ func addFile(r *repo.Repo, absPath string, keep bool) error {
 
 	// Check if already in repo.
 	if _, err := os.Stat(repoPath); err == nil {
-		// File exists in repo. Check if symlink is correct.
-		if linker.Check(repoPath, absPath) == linker.OK {
+		state := linker.Check(repoPath, absPath)
+		switch state {
+		case linker.OK:
 			fmt.Printf("Already managed: %s\n", pathutil.TildePath(absPath))
 			return nil
+		case linker.Broken, linker.Missing:
+			// Safe to re-link — no user data at risk.
+			if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "Warning: could not remove %s: %v\n", pathutil.TildePath(absPath), err)
+			}
+			if err := linker.Link(repoPath, absPath); err != nil {
+				return fmt.Errorf("create symlink: %w", err)
+			}
+			fmt.Printf("Re-linked %s\n", pathutil.TildePath(absPath))
+			return nil
+		case linker.Unlinked, linker.Conflict:
+			if !force {
+				return fmt.Errorf("file exists at %s (%s); use --force to overwrite",
+					pathutil.TildePath(absPath), state.String())
+			}
+			if err := os.Remove(absPath); err != nil {
+				return fmt.Errorf("remove existing file: %w", err)
+			}
+			if err := linker.Link(repoPath, absPath); err != nil {
+				return fmt.Errorf("create symlink: %w", err)
+			}
+			fmt.Printf("Re-linked (forced) %s\n", pathutil.TildePath(absPath))
+			return nil
 		}
-		// File in repo but symlink broken — re-create it.
-		if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "Warning: could not remove %s: %v\n", pathutil.TildePath(absPath), err)
-		}
-		if err := linker.Link(repoPath, absPath); err != nil {
-			return fmt.Errorf("create symlink: %w", err)
-		}
-		fmt.Printf("Re-linked %s\n", pathutil.TildePath(absPath))
-		return nil
+	}
+
+	// Warn if adding a potentially sensitive file without encryption.
+	if relPath, err := pathutil.RelToHome(absPath); err == nil && isSensitivePath(relPath) {
+		fmt.Fprintf(os.Stderr, "Warning: %s looks like a sensitive file; consider using --encrypt\n",
+			pathutil.TildePath(absPath))
 	}
 
 	if keep {
@@ -265,10 +365,10 @@ func addFile(r *repo.Repo, absPath string, keep bool) error {
 
 	// Stage in git.
 	relPath, _ := pathutil.RelToHome(absPath)
-	return git.Add(r.Path(), relPath)
+	return git.Add(ctx, r.Path(), relPath)
 }
 
-func addDirectory(r *repo.Repo, dirPath string, keep bool) error {
+func addDirectory(ctx context.Context, r *repo.Repo, dirPath string, keep, force bool) error {
 	var errors []error
 
 	err := filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
@@ -276,9 +376,12 @@ func addDirectory(r *repo.Repo, dirPath string, keep bool) error {
 			return err
 		}
 		if d.IsDir() {
+			if pathutil.IsUnderPath(path, r.Path()) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
-		if err := addFile(r, path, keep); err != nil {
+		if err := addPath(ctx, r, path, keep, force); err != nil {
 			errors = append(errors, fmt.Errorf("%s: %w", path, err))
 			fmt.Fprintf(os.Stderr, "Error: %s: %v\n", pathutil.TildePath(path), err)
 		}
@@ -292,4 +395,22 @@ func addDirectory(r *repo.Repo, dirPath string, keep bool) error {
 		return fmt.Errorf("%d file(s) in directory failed", len(errors))
 	}
 	return nil
+}
+
+var sensitivePatterns = []string{
+	".ssh/",
+	".gnupg/",
+	".aws/credentials",
+	".kube/config",
+	".netrc",
+	".docker/config.json",
+}
+
+func isSensitivePath(relPath string) bool {
+	for _, pattern := range sensitivePatterns {
+		if strings.HasPrefix(relPath, pattern) || relPath == strings.TrimSuffix(pattern, "/") {
+			return true
+		}
+	}
+	return false
 }

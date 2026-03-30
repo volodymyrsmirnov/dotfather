@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,7 +41,7 @@ func runTestGit(t *testing.T, dir string, args ...string) {
 
 func TestInit(t *testing.T) {
 	dir := t.TempDir()
-	if err := Init(dir); err != nil {
+	if err := Init(context.Background(), dir); err != nil {
 		t.Fatalf("Init() error: %v", err)
 	}
 
@@ -53,15 +54,15 @@ func TestInit(t *testing.T) {
 func TestIsGitRepo(t *testing.T) {
 	dir := t.TempDir()
 
-	if IsGitRepo(dir) {
+	if IsGitRepo(context.Background(), dir) {
 		t.Error("IsGitRepo() should be false for non-git dir")
 	}
 
-	if err := Init(dir); err != nil {
+	if err := Init(context.Background(), dir); err != nil {
 		t.Fatalf("Init() error: %v", err)
 	}
 
-	if !IsGitRepo(dir) {
+	if !IsGitRepo(context.Background(), dir) {
 		t.Error("IsGitRepo() should be true after init")
 	}
 }
@@ -74,16 +75,16 @@ func TestAddAndCommit(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	if err := Add(dir, "test.txt"); err != nil {
+	if err := Add(context.Background(), dir, "test.txt"); err != nil {
 		t.Fatalf("Add() error: %v", err)
 	}
 
-	if err := Commit(dir, "add test file"); err != nil {
+	if err := Commit(context.Background(), dir, "add test file"); err != nil {
 		t.Fatalf("Commit() error: %v", err)
 	}
 
 	// Verify the commit exists.
-	out, err := run(dir, "log", "--oneline", "-1")
+	out, err := run(context.Background(), dir, "log", "--oneline", "-1")
 	if err != nil {
 		t.Fatalf("git log error: %v", err)
 	}
@@ -102,11 +103,11 @@ func TestAddAll(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	if err := AddAll(dir); err != nil {
+	if err := AddAll(context.Background(), dir); err != nil {
 		t.Fatalf("AddAll() error: %v", err)
 	}
 
-	if err := Commit(dir, "add all"); err != nil {
+	if err := Commit(context.Background(), dir, "add all"); err != nil {
 		t.Fatalf("Commit() error: %v", err)
 	}
 }
@@ -115,7 +116,7 @@ func TestStatus(t *testing.T) {
 	dir := initTestRepo(t)
 
 	// Clean repo.
-	status, err := Status(dir)
+	status, err := Status(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("Status() error: %v", err)
 	}
@@ -126,7 +127,7 @@ func TestStatus(t *testing.T) {
 	// Add untracked file.
 	writeTestFile(t, filepath.Join(dir, "new.txt"), "new")
 
-	status, err = Status(dir)
+	status, err = Status(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("Status() error: %v", err)
 	}
@@ -138,7 +139,7 @@ func TestStatus(t *testing.T) {
 func TestHasUncommitted(t *testing.T) {
 	dir := initTestRepo(t)
 
-	has, err := HasUncommitted(dir)
+	has, err := HasUncommitted(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("HasUncommitted() error: %v", err)
 	}
@@ -148,7 +149,7 @@ func TestHasUncommitted(t *testing.T) {
 
 	writeTestFile(t, filepath.Join(dir, "new.txt"), "new")
 
-	has, err = HasUncommitted(dir)
+	has, err = HasUncommitted(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("HasUncommitted() error: %v", err)
 	}
@@ -160,7 +161,7 @@ func TestHasUncommitted(t *testing.T) {
 func TestCurrentBranch(t *testing.T) {
 	dir := initTestRepo(t)
 
-	branch, err := CurrentBranch(dir)
+	branch, err := CurrentBranch(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("CurrentBranch() error: %v", err)
 	}
@@ -174,13 +175,13 @@ func TestCurrentBranch(t *testing.T) {
 func TestHasRemote(t *testing.T) {
 	dir := initTestRepo(t)
 
-	if HasRemote(dir) {
+	if HasRemote(context.Background(), dir) {
 		t.Error("HasRemote() should be false with no remote")
 	}
 
 	runTestGit(t, dir, "remote", "add", "origin", "https://example.com/repo.git")
 
-	if !HasRemote(dir) {
+	if !HasRemote(context.Background(), dir) {
 		t.Error("HasRemote() should be true after adding remote")
 	}
 }
@@ -188,11 +189,11 @@ func TestHasRemote(t *testing.T) {
 func TestRemoteAdd(t *testing.T) {
 	dir := initTestRepo(t)
 
-	if err := RemoteAdd(dir, "origin", "https://example.com/repo.git"); err != nil {
+	if err := RemoteAdd(context.Background(), dir, "origin", "https://example.com/repo.git"); err != nil {
 		t.Fatalf("RemoteAdd() error: %v", err)
 	}
 
-	if !HasRemote(dir) {
+	if !HasRemote(context.Background(), dir) {
 		t.Error("remote should exist after RemoteAdd")
 	}
 }
@@ -201,7 +202,7 @@ func TestDiff(t *testing.T) {
 	dir := initTestRepo(t)
 
 	// No diff on clean repo.
-	diff, err := Diff(dir)
+	diff, err := Diff(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("Diff() error: %v", err)
 	}
@@ -212,7 +213,7 @@ func TestDiff(t *testing.T) {
 	// Modify tracked file.
 	writeTestFile(t, filepath.Join(dir, ".gitkeep"), "modified")
 
-	diff, err = Diff(dir)
+	diff, err = Diff(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("Diff() error: %v", err)
 	}
@@ -227,7 +228,7 @@ func TestDiffCached(t *testing.T) {
 	writeTestFile(t, filepath.Join(dir, "new.txt"), "new")
 	runTestGit(t, dir, "add", "new.txt")
 
-	diff, err := DiffCached(dir)
+	diff, err := DiffCached(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("DiffCached() error: %v", err)
 	}
@@ -240,7 +241,7 @@ func TestGitError(t *testing.T) {
 	dir := t.TempDir()
 
 	// Running git status in non-git dir should return GitError.
-	_, err := Status(dir)
+	_, err := Status(context.Background(), dir)
 	if err == nil {
 		t.Fatal("Status() should error in non-git dir")
 	}
@@ -266,7 +267,7 @@ func TestClone(t *testing.T) {
 
 	// Clone it.
 	dst := filepath.Join(t.TempDir(), "cloned")
-	if err := Clone(src, dst); err != nil {
+	if err := Clone(context.Background(), src, dst); err != nil {
 		t.Fatalf("Clone() error: %v", err)
 	}
 
@@ -282,9 +283,26 @@ func TestClone(t *testing.T) {
 
 func TestClone_BadURL(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "bad_clone")
-	err := Clone("https://nonexistent.invalid/repo.git", dst)
+	err := Clone(context.Background(), "https://nonexistent.invalid/repo.git", dst)
 	if err == nil {
 		t.Fatal("Clone() should error with bad URL")
+	}
+}
+
+func TestCommit_NoSigning(t *testing.T) {
+	dir := initTestRepo(t)
+
+	// Enable commit signing — Commit() should still succeed because it
+	// passes -c commit.gpgsign=false.
+	runTestGit(t, dir, "config", "commit.gpgsign", "true")
+
+	writeTestFile(t, filepath.Join(dir, "signed.txt"), "data")
+	if err := Add(context.Background(), dir, "signed.txt"); err != nil {
+		t.Fatalf("Add() error: %v", err)
+	}
+
+	if err := Commit(context.Background(), dir, "should not require signing"); err != nil {
+		t.Fatalf("Commit() error with gpgsign=true: %v", err)
 	}
 }
 

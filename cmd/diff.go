@@ -19,7 +19,7 @@ func newDiffCommand() *cli.Command {
 	}
 }
 
-func runDiff(_ context.Context, _ *cli.Command) error {
+func runDiff(ctx context.Context, _ *cli.Command) error {
 	r, err := repo.New()
 	if err != nil {
 		return err
@@ -28,12 +28,12 @@ func runDiff(_ context.Context, _ *cli.Command) error {
 		return err
 	}
 
-	unstaged, err := git.Diff(r.Path())
+	unstaged, err := git.Diff(ctx, r.Path())
 	if err != nil {
 		return fmt.Errorf("git diff: %w", err)
 	}
 
-	staged, err := git.DiffCached(r.Path())
+	staged, err := git.DiffCached(ctx, r.Path())
 	if err != nil {
 		return fmt.Errorf("git diff --cached: %w", err)
 	}

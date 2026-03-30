@@ -11,10 +11,12 @@ import (
 	"time"
 
 	cli "github.com/urfave/cli/v3"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/volodymyrsmirnov/dotfather/internal/crypto"
 	"github.com/volodymyrsmirnov/dotfather/internal/git"
 	"github.com/volodymyrsmirnov/dotfather/internal/linker"
+	"github.com/volodymyrsmirnov/dotfather/internal/lock"
 	"github.com/volodymyrsmirnov/dotfather/internal/pathutil"
 	"github.com/volodymyrsmirnov/dotfather/internal/repo"
 )
@@ -34,7 +36,7 @@ func newSyncCommand() *cli.Command {
 	}
 }
 
-func runSync(_ context.Context, c *cli.Command) error {
+func runSync(ctx context.Context, c *cli.Command) error {
 	r, err := repo.New()
 	if err != nil {
 		return err
@@ -43,25 +45,31 @@ func runSync(_ context.Context, c *cli.Command) error {
 		return err
 	}
 
+	lk, err := lock.Acquire(r.Path())
+	if err != nil {
+		return err
+	}
+	defer lk.Release()
+
 	interactive := c.Bool("interactive")
-	hasRemote := git.HasRemote(r.Path())
+	hasRemote := git.HasRemote(ctx, r.Path())
 
 	// Pull from remote if configured.
 	if hasRemote {
-		branch, err := git.CurrentBranch(r.Path())
+		branch, err := git.CurrentBranch(ctx, r.Path())
 		if err != nil {
 			return fmt.Errorf("detect branch: %w", err)
 		}
 
 		fmt.Printf("Pulling from origin/%s...\n", branch)
-		_, pullErr := git.Pull(r.Path(), branch)
+		_, pullErr := git.Pull(ctx, r.Path(), branch)
 
 		if pullErr != nil {
 			// Check if it's a conflict.
-			conflicted, _ := git.ConflictedFiles(r.Path())
+			conflicted, _ := git.ConflictedFiles(ctx, r.Path())
 			if len(conflicted) > 0 {
 				if interactive {
-					if err := resolveConflicts(r, conflicted); err != nil {
+					if err := resolveConflicts(ctx, r, conflicted); err != nil {
 						return err
 					}
 				} else {
@@ -97,7 +105,7 @@ func runSync(_ context.Context, c *cli.Command) error {
 	}
 
 	// Check for uncommitted changes.
-	porcelain, err := git.Status(r.Path())
+	porcelain, err := git.Status(ctx, r.Path())
 	if err != nil {
 		return fmt.Errorf("git status: %w", err)
 	}
@@ -108,12 +116,12 @@ func runSync(_ context.Context, c *cli.Command) error {
 	}
 
 	// Stage all changes.
-	if err := git.AddAll(r.Path()); err != nil {
+	if err := git.AddAll(ctx, r.Path()); err != nil {
 		return fmt.Errorf("git add: %w", err)
 	}
 
 	// Re-check status after staging.
-	porcelain, err = git.Status(r.Path())
+	porcelain, err = git.Status(ctx, r.Path())
 	if err != nil {
 		return fmt.Errorf("git status: %w", err)
 	}
@@ -127,16 +135,16 @@ func runSync(_ context.Context, c *cli.Command) error {
 	message := generateCommitMessage(porcelain)
 
 	// Commit.
-	if err := git.Commit(r.Path(), message); err != nil {
+	if err := git.Commit(ctx, r.Path(), message); err != nil {
 		return fmt.Errorf("git commit: %w", err)
 	}
 	fmt.Printf("Committed: %s\n", message)
 
 	// Push if remote configured.
 	if hasRemote {
-		branch, _ := git.CurrentBranch(r.Path())
+		branch, _ := git.CurrentBranch(ctx, r.Path())
 		fmt.Printf("Pushing to origin/%s...\n", branch)
-		if err := git.Push(r.Path(), branch); err != nil {
+		if err := git.Push(ctx, r.Path(), branch); err != nil {
 			return fmt.Errorf("git push failed: %w\nPush manually with: git -C %s push",
 				err, pathutil.TildePath(r.Path()))
 		}
@@ -193,7 +201,7 @@ func generateCommitMessage(porcelain string) string {
 	return fmt.Sprintf("Update %d dotfiles (%s)", total, time.Now().Format("2006-01-02 15:04"))
 }
 
-func resolveConflicts(r *repo.Repo, conflicted []string) error {
+func resolveConflicts(ctx context.Context, r *repo.Repo, conflicted []string) error {
 	reader := bufio.NewReader(os.Stdin)
 
 	for _, file := range conflicted {
@@ -204,7 +212,7 @@ func resolveConflicts(r *repo.Repo, conflicted []string) error {
 
 		input, err := reader.ReadString('\n')
 		if err != nil {
-			if abortErr := git.RebaseAbort(r.Path()); abortErr != nil {
+			if abortErr := git.RebaseAbort(ctx, r.Path()); abortErr != nil {
 				fmt.Fprintf(os.Stderr, "Warning: rebase abort failed: %v\n", abortErr)
 			}
 			return fmt.Errorf("read input: %w", err)
@@ -214,14 +222,14 @@ func resolveConflicts(r *repo.Repo, conflicted []string) error {
 
 		switch choice {
 		case "l":
-			if err := git.CheckoutOurs(r.Path(), file); err != nil {
-				if abortErr := git.RebaseAbort(r.Path()); abortErr != nil {
+			if err := git.CheckoutOurs(ctx, r.Path(), file); err != nil {
+				if abortErr := git.RebaseAbort(ctx, r.Path()); abortErr != nil {
 					fmt.Fprintf(os.Stderr, "Warning: rebase abort failed: %v\n", abortErr)
 				}
 				return fmt.Errorf("checkout ours: %w", err)
 			}
-			if err := git.Add(r.Path(), file); err != nil {
-				if abortErr := git.RebaseAbort(r.Path()); abortErr != nil {
+			if err := git.Add(ctx, r.Path(), file); err != nil {
+				if abortErr := git.RebaseAbort(ctx, r.Path()); abortErr != nil {
 					fmt.Fprintf(os.Stderr, "Warning: rebase abort failed: %v\n", abortErr)
 				}
 				return fmt.Errorf("stage file: %w", err)
@@ -229,14 +237,14 @@ func resolveConflicts(r *repo.Repo, conflicted []string) error {
 			fmt.Printf("  Accepted local version of %s\n", file)
 
 		case "r":
-			if err := git.CheckoutTheirs(r.Path(), file); err != nil {
-				if abortErr := git.RebaseAbort(r.Path()); abortErr != nil {
+			if err := git.CheckoutTheirs(ctx, r.Path(), file); err != nil {
+				if abortErr := git.RebaseAbort(ctx, r.Path()); abortErr != nil {
 					fmt.Fprintf(os.Stderr, "Warning: rebase abort failed: %v\n", abortErr)
 				}
 				return fmt.Errorf("checkout theirs: %w", err)
 			}
-			if err := git.Add(r.Path(), file); err != nil {
-				if abortErr := git.RebaseAbort(r.Path()); abortErr != nil {
+			if err := git.Add(ctx, r.Path(), file); err != nil {
+				if abortErr := git.RebaseAbort(ctx, r.Path()); abortErr != nil {
 					fmt.Fprintf(os.Stderr, "Warning: rebase abort failed: %v\n", abortErr)
 				}
 				return fmt.Errorf("stage file: %w", err)
@@ -256,14 +264,14 @@ func resolveConflicts(r *repo.Repo, conflicted []string) error {
 
 			fmt.Printf("  Opening %s in %s...\n", file, editor)
 			if err := cmd.Run(); err != nil {
-				if abortErr := git.RebaseAbort(r.Path()); abortErr != nil {
+				if abortErr := git.RebaseAbort(ctx, r.Path()); abortErr != nil {
 					fmt.Fprintf(os.Stderr, "Warning: rebase abort failed: %v\n", abortErr)
 				}
 				return fmt.Errorf("editor: %w", err)
 			}
 
-			if err := git.Add(r.Path(), file); err != nil {
-				if abortErr := git.RebaseAbort(r.Path()); abortErr != nil {
+			if err := git.Add(ctx, r.Path(), file); err != nil {
+				if abortErr := git.RebaseAbort(ctx, r.Path()); abortErr != nil {
 					fmt.Fprintf(os.Stderr, "Warning: rebase abort failed: %v\n", abortErr)
 				}
 				return fmt.Errorf("stage file: %w", err)
@@ -271,7 +279,7 @@ func resolveConflicts(r *repo.Repo, conflicted []string) error {
 			fmt.Printf("  Resolved %s\n", file)
 
 		default:
-			if abortErr := git.RebaseAbort(r.Path()); abortErr != nil {
+			if abortErr := git.RebaseAbort(ctx, r.Path()); abortErr != nil {
 				fmt.Fprintf(os.Stderr, "Warning: rebase abort failed: %v\n", abortErr)
 			}
 			return fmt.Errorf("invalid choice: %s (expected l, r, or m)", choice)
@@ -279,7 +287,7 @@ func resolveConflicts(r *repo.Repo, conflicted []string) error {
 	}
 
 	fmt.Println("\nAll conflicts resolved. Continuing rebase...")
-	if err := git.RebaseContinue(r.Path()); err != nil {
+	if err := git.RebaseContinue(ctx, r.Path()); err != nil {
 		return fmt.Errorf("rebase continue: %w", err)
 	}
 
@@ -357,37 +365,41 @@ func reencryptChangedFiles(r *repo.Repo) error {
 		return err
 	}
 
+	g := new(errgroup.Group)
 	for _, relPath := range files {
 		if !crypto.IsEncrypted(relPath) {
 			continue
 		}
 
-		plaintextRel := crypto.PlaintextPath(relPath)
-		targetPath := filepath.Join(home, plaintextRel)
-		encFile := filepath.Join(r.Path(), relPath)
+		relPath := relPath
+		g.Go(func() error {
+			plaintextRel := crypto.PlaintextPath(relPath)
+			targetPath := filepath.Join(home, plaintextRel)
+			encFile := filepath.Join(r.Path(), relPath)
 
-		targetInfo, err := os.Stat(targetPath)
-		if err != nil {
-			continue // Target doesn't exist — nothing to re-encrypt.
-		}
-
-		encInfo, err := os.Stat(encFile)
-		if err != nil {
-			continue
-		}
-
-		// Re-encrypt if target is newer than the encrypted file.
-		if targetInfo.ModTime().After(encInfo.ModTime()) {
-			if err := crypto.EncryptFile(r.Path(), targetPath, encFile); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: could not re-encrypt %s: %v\n",
-					pathutil.TildePath(targetPath), err)
-				continue
+			targetInfo, err := os.Stat(targetPath)
+			if err != nil {
+				return nil // Target doesn't exist — nothing to re-encrypt.
 			}
-			fmt.Printf("Re-encrypted %s\n", pathutil.TildePath(targetPath))
-		}
+
+			encInfo, err := os.Stat(encFile)
+			if err != nil {
+				return nil
+			}
+
+			if targetInfo.ModTime().After(encInfo.ModTime()) {
+				if err := crypto.EncryptFile(r.Path(), targetPath, encFile); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: could not re-encrypt %s: %v\n",
+						pathutil.TildePath(targetPath), err)
+					return err
+				}
+				fmt.Printf("Re-encrypted %s\n", pathutil.TildePath(targetPath))
+			}
+			return nil
+		})
 	}
 
-	return nil
+	return g.Wait()
 }
 
 // decryptEncryptedFiles decrypts all .age files in the repo to their target paths.
@@ -406,6 +418,7 @@ func decryptEncryptedFiles(r *repo.Repo) error {
 		return err
 	}
 
+	var firstErr error
 	for _, relPath := range files {
 		if !crypto.IsEncrypted(relPath) {
 			continue
@@ -415,13 +428,25 @@ func decryptEncryptedFiles(r *repo.Repo) error {
 		targetPath := filepath.Join(home, plaintextRel)
 		encFile := filepath.Join(r.Path(), relPath)
 
+		// Skip if target is newer than the encrypted file (local edits).
+		// reencryptChangedFiles will handle re-encrypting these later.
+		if targetInfo, err := os.Stat(targetPath); err == nil {
+			encInfo, encErr := os.Stat(encFile)
+			if encErr == nil && targetInfo.ModTime().After(encInfo.ModTime()) {
+				continue
+			}
+		}
+
 		if err := crypto.DecryptFile(r.Path(), encFile, targetPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not decrypt %s: %v\n",
 				pathutil.TildePath(targetPath), err)
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		fmt.Printf("Decrypted %s\n", pathutil.TildePath(targetPath))
 	}
 
-	return nil
+	return firstErr
 }

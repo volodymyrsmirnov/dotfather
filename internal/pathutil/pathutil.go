@@ -76,6 +76,15 @@ func IsUnderHome(absPath string) (bool, error) {
 	return !strings.HasPrefix(rel, ".."), nil
 }
 
+// IsUnderPath checks whether absPath is equal to or a descendant of dirPath.
+func IsUnderPath(absPath, dirPath string) bool {
+	rel, err := filepath.Rel(dirPath, absPath)
+	if err != nil {
+		return false
+	}
+	return rel == "." || !strings.HasPrefix(rel, "..")
+}
+
 // TildePath returns a path with ~ prefix for display (e.g., ~/.config/foo).
 func TildePath(absPath string) string {
 	home, err := HomeDir()

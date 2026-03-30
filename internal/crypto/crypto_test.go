@@ -130,6 +130,31 @@ func TestEncryptDecryptFile(t *testing.T) {
 	}
 }
 
+func TestEncryptFile_Permissions(t *testing.T) {
+	dir := t.TempDir()
+	if err := GenerateKey(dir); err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	srcFile := filepath.Join(dir, "secret.txt")
+	if err := os.WriteFile(srcFile, []byte("data"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	encFile := filepath.Join(dir, "secret.txt.age")
+	if err := EncryptFile(dir, srcFile, encFile); err != nil {
+		t.Fatalf("EncryptFile: %v", err)
+	}
+
+	info, err := os.Stat(encFile)
+	if err != nil {
+		t.Fatalf("stat encrypted: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("encrypted file permissions = %v, want 0600", info.Mode().Perm())
+	}
+}
+
 func TestEncryptFile_CreatesParentDirs(t *testing.T) {
 	dir := t.TempDir()
 	if err := GenerateKey(dir); err != nil {
@@ -233,6 +258,49 @@ func TestPlaintextPath(t *testing.T) {
 func TestEncryptedPath(t *testing.T) {
 	if got := EncryptedPath(".ssh/config"); got != ".ssh/config.age" {
 		t.Errorf("EncryptedPath() = %q, want %q", got, ".ssh/config.age")
+	}
+}
+
+func TestDecryptFile_PreservesExistingMode(t *testing.T) {
+	dir := t.TempDir()
+	if err := GenerateKey(dir); err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	srcFile := filepath.Join(dir, "script.sh")
+	if err := os.WriteFile(srcFile, []byte("#!/bin/sh\necho hi"), 0755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	encFile := filepath.Join(dir, "script.sh.age")
+	if err := EncryptFile(dir, srcFile, encFile); err != nil {
+		t.Fatalf("EncryptFile: %v", err)
+	}
+
+	// Create target with 0755 before decrypting over it.
+	dstFile := filepath.Join(dir, "out.sh")
+	if err := os.WriteFile(dstFile, []byte("old"), 0755); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	if err := DecryptFile(dir, encFile, dstFile); err != nil {
+		t.Fatalf("DecryptFile: %v", err)
+	}
+
+	info, err := os.Stat(dstFile)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0755 {
+		t.Errorf("permissions = %v, want 0755", info.Mode().Perm())
+	}
+
+	data, err := os.ReadFile(dstFile)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(data) != "#!/bin/sh\necho hi" {
+		t.Errorf("content = %q, want script", data)
 	}
 }
 

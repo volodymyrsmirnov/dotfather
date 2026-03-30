@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -15,17 +16,19 @@ import (
 
 // metaFiles are repo files that should not be symlinked to ~.
 var metaFiles = map[string]bool{
-	"README.md":          true,
-	".gitignore":         true,
-	crypto.RecipientFile: true,
-	crypto.IdentityFile:  true,
+	"README.md":            true,
+	".gitignore":           true,
+	".dotfather-ignore":    true,
+	crypto.RecipientFile:   true,
+	crypto.IdentityFile:    true,
 }
 
 const defaultDirName = ".dotfather"
 
 // Repo represents the dotfather repository.
 type Repo struct {
-	path string
+	path           string
+	extraMetaFiles map[string]bool
 }
 
 // New creates a Repo instance using $DOTFATHER_DIR or ~/.dotfather/.
@@ -39,7 +42,9 @@ func New() (*Repo, error) {
 		dir = filepath.Join(home, defaultDirName)
 	}
 
-	return &Repo{path: dir}, nil
+	r := &Repo{path: dir}
+	r.loadIgnoreFile()
+	return r, nil
 }
 
 // Path returns the absolute path to the repository.
@@ -55,7 +60,7 @@ func (r *Repo) Exists() bool {
 
 // IsGitRepo returns true if the repo is a valid git repository.
 func (r *Repo) IsGitRepo() bool {
-	return r.Exists() && git.IsGitRepo(r.path)
+	return r.Exists() && git.IsGitRepo(context.Background(), r.path)
 }
 
 // EnsureExists returns an error if the repo doesn't exist or isn't a git repo.
@@ -70,8 +75,26 @@ func (r *Repo) EnsureExists() error {
 }
 
 // IsMetaFile returns true if the repo-relative path is a meta file (not a dotfile).
-func IsMetaFile(relPath string) bool {
-	return metaFiles[relPath]
+func (r *Repo) IsMetaFile(relPath string) bool {
+	if metaFiles[relPath] {
+		return true
+	}
+	return r.extraMetaFiles[relPath]
+}
+
+func (r *Repo) loadIgnoreFile() {
+	data, err := os.ReadFile(filepath.Join(r.path, ".dotfather-ignore"))
+	if err != nil {
+		return
+	}
+	r.extraMetaFiles = make(map[string]bool)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		r.extraMetaFiles[line] = true
+	}
 }
 
 // ManagedFiles returns all dotfiles in the repo (relative paths),
@@ -90,7 +113,7 @@ func (r *Repo) ManagedFiles() ([]string, error) {
 			if err != nil {
 				return err
 			}
-			if !IsMetaFile(rel) {
+			if !r.IsMetaFile(rel) {
 				files = append(files, rel)
 			}
 		}
@@ -107,8 +130,8 @@ func (r *Repo) ManagedFiles() ([]string, error) {
 // WriteREADME creates a README.md in the repo with setup instructions.
 func (r *Repo) WriteREADME() error {
 	originURL := "<your-dotfiles-repo-url>"
-	if git.HasRemote(r.path) {
-		if url, err := git.RemoteGetURL(r.path); err == nil {
+	if git.HasRemote(context.Background(), r.path) {
+		if url, err := git.RemoteGetURL(context.Background(), r.path); err == nil {
 			originURL = strings.TrimSpace(url)
 		}
 	}
@@ -143,7 +166,7 @@ Managed by [dotfather](https://github.com/volodymyrsmirnov/dotfather).
 
 // WriteGitignore creates a .gitignore in the repo that excludes the age identity.
 func (r *Repo) WriteGitignore() error {
-	content := ".age-identity\n"
+	content := ".age-identity\n.lock\n"
 	return os.WriteFile(filepath.Join(r.path, ".gitignore"), []byte(content), 0644)
 }
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"filippo.io/age"
+	"filippo.io/age/agessh"
 )
 
 const (
@@ -63,16 +64,17 @@ func EncryptFile(repoPath, srcFile, dstFile string) error {
 		return err
 	}
 
-	plaintext, err := os.ReadFile(srcFile)
+	src, err := os.Open(srcFile)
 	if err != nil {
-		return fmt.Errorf("read source: %w", err)
+		return fmt.Errorf("open source: %w", err)
 	}
+	defer src.Close()
 
 	if err := os.MkdirAll(filepath.Dir(dstFile), 0755); err != nil {
 		return fmt.Errorf("create parent dirs: %w", err)
 	}
 
-	dst, err := os.Create(dstFile)
+	dst, err := os.OpenFile(dstFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("create output: %w", err)
 	}
@@ -83,7 +85,7 @@ func EncryptFile(repoPath, srcFile, dstFile string) error {
 		return fmt.Errorf("encrypt: %w", err)
 	}
 
-	if _, err := w.Write(plaintext); err != nil {
+	if _, err := io.Copy(w, src); err != nil {
 		_ = dst.Close()
 		return fmt.Errorf("write encrypted data: %w", err)
 	}
@@ -124,7 +126,13 @@ func DecryptFile(repoPath, srcFile, dstFile string) error {
 		return fmt.Errorf("create parent dirs: %w", err)
 	}
 
-	if err := os.WriteFile(dstFile, plaintext, 0600); err != nil {
+	// Preserve existing file permissions; default to 0600 for new files.
+	mode := os.FileMode(0600)
+	if info, err := os.Stat(dstFile); err == nil {
+		mode = info.Mode().Perm()
+	}
+
+	if err := os.WriteFile(dstFile, plaintext, mode); err != nil {
 		return fmt.Errorf("write decrypted file: %w", err)
 	}
 
@@ -157,34 +165,42 @@ func loadRecipient(repoPath string) (age.Recipient, error) {
 		return nil, fmt.Errorf("recipient file is empty")
 	}
 
-	// Take first non-comment line.
+	// Take first non-comment line; try X25519, then SSH public key.
 	for _, l := range strings.Split(line, "\n") {
 		l = strings.TrimSpace(l)
 		if l == "" || strings.HasPrefix(l, "#") {
 			continue
 		}
-		return age.ParseX25519Recipient(l)
+		if r, err := age.ParseX25519Recipient(l); err == nil {
+			return r, nil
+		}
+		if r, err := agessh.ParseRecipient(l); err == nil {
+			return r, nil
+		}
 	}
 
 	return nil, fmt.Errorf("no recipient found in %s", RecipientFile)
 }
 
 func loadIdentities(repoPath string) ([]age.Identity, error) {
-	f, err := os.Open(filepath.Join(repoPath, IdentityFile))
+	data, err := os.ReadFile(filepath.Join(repoPath, IdentityFile))
 	if err != nil {
 		return nil, fmt.Errorf("open identity file: %w (copy from another machine or run 'dotfather init')", err)
 	}
-	defer func() { _ = f.Close() }()
 
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return nil, fmt.Errorf("read identity file: %w", err)
+	// Try native age identities first.
+	identities, err := age.ParseIdentities(bytes.NewReader(data))
+	if err == nil && len(identities) > 0 {
+		return identities, nil
 	}
 
-	identities, err := age.ParseIdentities(bytes.NewReader(data))
+	// Try SSH private key.
+	if id, sshErr := agessh.ParseIdentity(data); sshErr == nil {
+		return []age.Identity{id}, nil
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("parse identities: %w", err)
 	}
-
-	return identities, nil
+	return nil, fmt.Errorf("no identities found in %s", IdentityFile)
 }

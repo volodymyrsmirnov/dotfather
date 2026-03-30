@@ -159,6 +159,45 @@ func TestManagedFiles_ExcludesGitDir(t *testing.T) {
 	}
 }
 
+func TestManagedFiles_RespectsIgnoreFile(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	// Create a custom file to ignore.
+	testutil.CreateFile(t, repoDir, "notes.txt", "personal notes")
+	// Create a .dotfather-ignore that excludes it.
+	testutil.CreateFile(t, repoDir, ".dotfather-ignore", "notes.txt\n")
+	// Create a normal managed file.
+	testutil.CreateFile(t, repoDir, ".bashrc", "# bash")
+
+	r, _ := New()
+
+	files, err := r.ManagedFiles()
+	if err != nil {
+		t.Fatalf("ManagedFiles() error: %v", err)
+	}
+
+	for _, f := range files {
+		if f == "notes.txt" {
+			t.Error("ManagedFiles() should exclude files listed in .dotfather-ignore")
+		}
+		if f == ".dotfather-ignore" {
+			t.Error("ManagedFiles() should exclude .dotfather-ignore itself")
+		}
+	}
+
+	found := false
+	for _, f := range files {
+		if f == ".bashrc" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("ManagedFiles() should still include normal files")
+	}
+}
+
 func TestRepoPathFor(t *testing.T) {
 	home := testutil.SetupTestHome(t)
 	repoDir := filepath.Join(home, ".dotfather")

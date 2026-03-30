@@ -25,7 +25,7 @@ func newInitCommand() *cli.Command {
 	}
 }
 
-func runInit(_ context.Context, c *cli.Command) error {
+func runInit(ctx context.Context, c *cli.Command) error {
 	if !git.GitAvailable() {
 		return fmt.Errorf("git is required but not found in PATH")
 	}
@@ -49,18 +49,18 @@ func runInit(_ context.Context, c *cli.Command) error {
 	url := c.Args().First()
 
 	if url == "" {
-		return initFresh(r)
+		return initFresh(ctx, r)
 	}
 
-	return initFromClone(r, url)
+	return initFromClone(ctx, r, url)
 }
 
-func initFresh(r *repo.Repo) error {
+func initFresh(ctx context.Context, r *repo.Repo) error {
 	if err := os.MkdirAll(r.Path(), 0755); err != nil {
 		return fmt.Errorf("create directory: %w", err)
 	}
 
-	if err := git.Init(r.Path()); err != nil {
+	if err := git.Init(ctx, r.Path()); err != nil {
 		return fmt.Errorf("git init: %w", err)
 	}
 
@@ -80,7 +80,7 @@ func initFresh(r *repo.Repo) error {
 	}
 
 	// Stage meta files.
-	if err := git.Add(r.Path(), ".gitignore", crypto.RecipientFile, "README.md"); err != nil {
+	if err := git.Add(ctx, r.Path(), ".gitignore", crypto.RecipientFile, "README.md"); err != nil {
 		return fmt.Errorf("git add: %w", err)
 	}
 
@@ -88,8 +88,8 @@ func initFresh(r *repo.Repo) error {
 	return nil
 }
 
-func initFromClone(r *repo.Repo, url string) error {
-	if err := git.Clone(url, r.Path()); err != nil {
+func initFromClone(ctx context.Context, r *repo.Repo, url string) error {
+	if err := git.Clone(ctx, url, r.Path()); err != nil {
 		return fmt.Errorf("git clone: %w", err)
 	}
 
@@ -142,6 +142,20 @@ func initFromClone(r *repo.Repo, url string) error {
 				continue
 			}
 			encFile := filepath.Join(r.Path(), relPath)
+
+			// Back up existing target before decrypting over it.
+			if _, err := os.Lstat(targetPath); err == nil {
+				backupPath := targetPath + ".dotfather-backup"
+				if err := os.Rename(targetPath, backupPath); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: could not back up %s: %v\n",
+						pathutil.TildePath(targetPath), err)
+					continue
+				}
+				fmt.Printf("Backed up %s to %s\n",
+					pathutil.TildePath(targetPath), pathutil.TildePath(backupPath))
+				backups++
+			}
+
 			if err := crypto.DecryptFile(r.Path(), encFile, targetPath); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: could not decrypt %s: %v\n",
 					pathutil.TildePath(targetPath), err)

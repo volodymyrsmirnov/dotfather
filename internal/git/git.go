@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -19,8 +20,8 @@ func (e *GitError) Error() string {
 }
 
 // run executes a git command in the given directory and returns stdout.
-func run(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+func run(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 
 	var stdout, stderr strings.Builder
@@ -49,8 +50,8 @@ func run(dir string, args ...string) (string, error) {
 }
 
 // runCombined executes a git command and returns combined stdout+stderr.
-func runCombined(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+func runCombined(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 
 	out, err := cmd.CombinedOutput()
@@ -75,14 +76,14 @@ func runCombined(dir string, args ...string) (string, error) {
 }
 
 // Init initializes a new git repository.
-func Init(dir string) error {
-	_, err := run(dir, "init")
+func Init(ctx context.Context, dir string) error {
+	_, err := run(ctx, dir, "init")
 	return err
 }
 
 // Clone clones a repository into the given directory.
-func Clone(url, dir string) error {
-	cmd := exec.Command("git", "clone", url, dir)
+func Clone(ctx context.Context, url, dir string) error {
+	cmd := exec.CommandContext(ctx, "git", "clone", url, dir)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 
@@ -102,70 +103,71 @@ func Clone(url, dir string) error {
 }
 
 // Add stages files.
-func Add(dir string, paths ...string) error {
+func Add(ctx context.Context, dir string, paths ...string) error {
 	args := append([]string{"add", "--"}, paths...)
-	_, err := run(dir, args...)
+	_, err := run(ctx, dir, args...)
 	return err
 }
 
 // AddAll stages all changes.
-func AddAll(dir string) error {
-	_, err := run(dir, "add", "-A")
+func AddAll(ctx context.Context, dir string) error {
+	_, err := run(ctx, dir, "add", "-A")
 	return err
 }
 
 // Commit creates a commit with the given message.
-func Commit(dir, message string) error {
-	_, err := run(dir, "commit", "-m", message)
+// Signing is disabled to avoid depending on the caller's GPG/SSH agent.
+func Commit(ctx context.Context, dir, message string) error {
+	_, err := run(ctx, dir, "-c", "commit.gpgsign=false", "commit", "-m", message)
 	return err
 }
 
 // Pull runs git pull --rebase for the given branch.
-func Pull(dir, branch string) (string, error) {
-	return runCombined(dir, "pull", "--rebase", "origin", branch)
+func Pull(ctx context.Context, dir, branch string) (string, error) {
+	return runCombined(ctx, dir, "pull", "--rebase", "origin", branch)
 }
 
 // Push pushes to origin for the given branch.
-func Push(dir, branch string) error {
-	_, err := run(dir, "push", "origin", branch)
+func Push(ctx context.Context, dir, branch string) error {
+	_, err := run(ctx, dir, "push", "origin", branch)
 	return err
 }
 
 // Status returns the porcelain status output.
-func Status(dir string) (string, error) {
-	return run(dir, "status", "--porcelain")
+func Status(ctx context.Context, dir string) (string, error) {
+	return run(ctx, dir, "status", "--porcelain")
 }
 
 // Diff returns the diff output.
-func Diff(dir string) (string, error) {
-	return run(dir, "diff")
+func Diff(ctx context.Context, dir string) (string, error) {
+	return run(ctx, dir, "diff")
 }
 
 // DiffCached returns the staged diff output.
-func DiffCached(dir string) (string, error) {
-	return run(dir, "diff", "--cached")
+func DiffCached(ctx context.Context, dir string) (string, error) {
+	return run(ctx, dir, "diff", "--cached")
 }
 
 // HasRemote checks if the "origin" remote is configured.
-func HasRemote(dir string) bool {
-	_, err := run(dir, "remote", "get-url", "origin")
+func HasRemote(ctx context.Context, dir string) bool {
+	_, err := run(ctx, dir, "remote", "get-url", "origin")
 	return err == nil
 }
 
 // RemoteGetURL returns the URL of the "origin" remote.
-func RemoteGetURL(dir string) (string, error) {
-	return run(dir, "remote", "get-url", "origin")
+func RemoteGetURL(ctx context.Context, dir string) (string, error) {
+	return run(ctx, dir, "remote", "get-url", "origin")
 }
 
 // RemoteAdd adds a remote.
-func RemoteAdd(dir, name, url string) error {
-	_, err := run(dir, "remote", "add", name, url)
+func RemoteAdd(ctx context.Context, dir, name, url string) error {
+	_, err := run(ctx, dir, "remote", "add", name, url)
 	return err
 }
 
 // CurrentBranch returns the current branch name.
-func CurrentBranch(dir string) (string, error) {
-	out, err := run(dir, "symbolic-ref", "--short", "HEAD")
+func CurrentBranch(ctx context.Context, dir string) (string, error) {
+	out, err := run(ctx, dir, "symbolic-ref", "--short", "HEAD")
 	if err != nil {
 		return "", err
 	}
@@ -173,8 +175,8 @@ func CurrentBranch(dir string) (string, error) {
 }
 
 // HasUncommitted returns true if there are uncommitted changes.
-func HasUncommitted(dir string) (bool, error) {
-	out, err := Status(dir)
+func HasUncommitted(ctx context.Context, dir string) (bool, error) {
+	out, err := Status(ctx, dir)
 	if err != nil {
 		return false, err
 	}
@@ -182,8 +184,8 @@ func HasUncommitted(dir string) (bool, error) {
 }
 
 // ConflictedFiles returns the list of files with merge conflicts.
-func ConflictedFiles(dir string) ([]string, error) {
-	out, err := run(dir, "diff", "--name-only", "--diff-filter=U")
+func ConflictedFiles(ctx context.Context, dir string) ([]string, error) {
+	out, err := run(ctx, dir, "diff", "--name-only", "--diff-filter=U")
 	if err != nil {
 		return nil, err
 	}
@@ -197,32 +199,32 @@ func ConflictedFiles(dir string) ([]string, error) {
 }
 
 // CheckoutOurs checks out the local version of a conflicting file.
-func CheckoutOurs(dir, path string) error {
-	_, err := run(dir, "checkout", "--ours", "--", path)
+func CheckoutOurs(ctx context.Context, dir, path string) error {
+	_, err := run(ctx, dir, "checkout", "--ours", "--", path)
 	return err
 }
 
 // CheckoutTheirs checks out the remote version of a conflicting file.
-func CheckoutTheirs(dir, path string) error {
-	_, err := run(dir, "checkout", "--theirs", "--", path)
+func CheckoutTheirs(ctx context.Context, dir, path string) error {
+	_, err := run(ctx, dir, "checkout", "--theirs", "--", path)
 	return err
 }
 
 // RebaseContinue continues a rebase in progress.
-func RebaseContinue(dir string) error {
-	_, err := run(dir, "rebase", "--continue")
+func RebaseContinue(ctx context.Context, dir string) error {
+	_, err := run(ctx, dir, "rebase", "--continue")
 	return err
 }
 
 // RebaseAbort aborts a rebase in progress.
-func RebaseAbort(dir string) error {
-	_, err := run(dir, "rebase", "--abort")
+func RebaseAbort(ctx context.Context, dir string) error {
+	_, err := run(ctx, dir, "rebase", "--abort")
 	return err
 }
 
 // IsGitRepo checks if the directory is a git repository.
-func IsGitRepo(dir string) bool {
-	_, err := run(dir, "rev-parse", "--git-dir")
+func IsGitRepo(ctx context.Context, dir string) bool {
+	_, err := run(ctx, dir, "rev-parse", "--git-dir")
 	return err == nil
 }
 
@@ -234,8 +236,8 @@ func GitAvailable() bool {
 
 // AheadBehind returns how many commits ahead and behind the current branch is
 // relative to its upstream.
-func AheadBehind(dir string) (ahead, behind int, err error) {
-	out, err := run(dir, "rev-list", "--left-right", "--count", "HEAD...@{upstream}")
+func AheadBehind(ctx context.Context, dir string) (ahead, behind int, err error) {
+	out, err := run(ctx, dir, "rev-list", "--left-right", "--count", "HEAD...@{upstream}")
 	if err != nil {
 		return 0, 0, err
 	}

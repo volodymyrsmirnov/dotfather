@@ -182,6 +182,31 @@ func TestIsUnderHome(t *testing.T) {
 	}
 }
 
+func TestIsUnderPath(t *testing.T) {
+	tests := []struct {
+		name    string
+		absPath string
+		dirPath string
+		want    bool
+	}{
+		{"same path", "/a/b", "/a/b", true},
+		{"child path", "/a/b/c", "/a/b", true},
+		{"deeply nested", "/a/b/c/d/e", "/a/b", true},
+		{"sibling path", "/a/c", "/a/b", false},
+		{"parent path", "/a", "/a/b", false},
+		{"unrelated path", "/x/y", "/a/b", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsUnderPath(tt.absPath, tt.dirPath)
+			if got != tt.want {
+				t.Errorf("IsUnderPath(%q, %q) = %v, want %v", tt.absPath, tt.dirPath, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTildePath(t *testing.T) {
 	home := resolvedTempDir(t)
 	t.Setenv("HOME", home)

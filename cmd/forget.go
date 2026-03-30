@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	cli "github.com/urfave/cli/v3"
 
 	"github.com/volodymyrsmirnov/dotfather/internal/crypto"
 	"github.com/volodymyrsmirnov/dotfather/internal/git"
 	"github.com/volodymyrsmirnov/dotfather/internal/linker"
+	"github.com/volodymyrsmirnov/dotfather/internal/lock"
 	"github.com/volodymyrsmirnov/dotfather/internal/pathutil"
 	"github.com/volodymyrsmirnov/dotfather/internal/repo"
 )
@@ -31,7 +33,7 @@ func newForgetCommand() *cli.Command {
 	}
 }
 
-func runForget(_ context.Context, c *cli.Command) error {
+func runForget(ctx context.Context, c *cli.Command) error {
 	if c.NArg() == 0 {
 		return fmt.Errorf("at least one path is required")
 	}
@@ -44,12 +46,18 @@ func runForget(_ context.Context, c *cli.Command) error {
 		return err
 	}
 
+	lk, err := lock.Acquire(r.Path())
+	if err != nil {
+		return err
+	}
+	defer lk.Release()
+
 	force := c.Bool("force")
 	var errors []error
 
 	for i := 0; i < c.NArg(); i++ {
 		arg := c.Args().Get(i)
-		if err := forgetFile(r, arg, force); err != nil {
+		if err := forgetFile(ctx, r, arg, force); err != nil {
 			errors = append(errors, fmt.Errorf("%s: %w", arg, err))
 			fmt.Fprintf(os.Stderr, "Error: %s: %v\n", arg, err)
 		}
@@ -62,12 +70,72 @@ func runForget(_ context.Context, c *cli.Command) error {
 	return nil
 }
 
-func forgetFile(r *repo.Repo, path string, force bool) error {
+func forgetFile(ctx context.Context, r *repo.Repo, path string, force bool) error {
 	absPath, err := pathutil.NormalizePath(path)
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
 	}
 
+	underHome, err := pathutil.IsUnderHome(absPath)
+	if err != nil {
+		return err
+	}
+	if !underHome {
+		return fmt.Errorf("only files under your home directory can be managed")
+	}
+
+	if info, err := os.Stat(absPath); err == nil && info.IsDir() {
+		return forgetDirectory(ctx, r, absPath, force)
+	}
+
+	return forgetSingleFile(ctx, r, absPath, force)
+}
+
+func forgetDirectory(ctx context.Context, r *repo.Repo, dirPath string, force bool) error {
+	relDir, err := pathutil.RelToHome(dirPath)
+	if err != nil {
+		return err
+	}
+
+	files, err := r.ManagedFiles()
+	if err != nil {
+		return err
+	}
+
+	home, err := pathutil.HomeDir()
+	if err != nil {
+		return err
+	}
+
+	var errors []error
+	found := false
+	for _, relPath := range files {
+		plaintextRel := relPath
+		if crypto.IsEncrypted(relPath) {
+			plaintextRel = crypto.PlaintextPath(relPath)
+		}
+		if !strings.HasPrefix(plaintextRel, relDir+"/") {
+			continue
+		}
+		found = true
+		targetPath := filepath.Join(home, plaintextRel)
+		if err := forgetSingleFile(ctx, r, targetPath, force); err != nil {
+			errors = append(errors, fmt.Errorf("%s: %w", pathutil.TildePath(targetPath), err))
+			fmt.Fprintf(os.Stderr, "Error: %s: %v\n", pathutil.TildePath(targetPath), err)
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("no managed files found under %s", pathutil.TildePath(dirPath))
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("%d file(s) failed", len(errors))
+	}
+	return nil
+}
+
+func forgetSingleFile(ctx context.Context, r *repo.Repo, absPath string, force bool) error {
 	relPath, err := pathutil.RelToHome(absPath)
 	if err != nil {
 		return err
@@ -93,13 +161,21 @@ func forgetFile(r *repo.Repo, path string, force bool) error {
 
 	// Handle encrypted file forget.
 	if isEncrypted {
+		// Ensure target file exists before removing the .age source.
+		if _, err := os.Stat(absPath); os.IsNotExist(err) {
+			if err := crypto.DecryptFile(r.Path(), encRepoFile, absPath); err != nil {
+				return fmt.Errorf("decrypt before forget: %w", err)
+			}
+			fmt.Printf("Decrypted %s before forgetting\n", pathutil.TildePath(absPath))
+		}
+
 		if err := os.Remove(encRepoFile); err != nil {
 			return fmt.Errorf("remove from repo: %w", err)
 		}
 		if err := linker.CleanEmptyDirs(encRepoFile, r.Path()); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
 		}
-		if err := git.Add(r.Path(), encRelPath); err != nil {
+		if err := git.Add(ctx, r.Path(), encRelPath); err != nil {
 			return fmt.Errorf("git stage: %w", err)
 		}
 		fmt.Printf("Forgotten (encrypted) %s\n", pathutil.TildePath(absPath))
@@ -155,7 +231,7 @@ func forgetFile(r *repo.Repo, path string, force bool) error {
 	}
 
 	// Stage the deletion in git.
-	if err := git.Add(r.Path(), relPath); err != nil {
+	if err := git.Add(ctx, r.Path(), relPath); err != nil {
 		return fmt.Errorf("git stage: %w", err)
 	}
 

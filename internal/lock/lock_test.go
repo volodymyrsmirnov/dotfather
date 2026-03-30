@@ -76,7 +76,7 @@ func TestAcquire_DoesNotRemoveLiveLock(t *testing.T) {
 	}
 
 	// Clean up manually since we didn't use Acquire to create it.
-	os.Remove(lockPath)
+	_ = os.Remove(lockPath)
 }
 
 func TestAcquire_DoesNotRemoveLockOnEPERM(t *testing.T) {
@@ -98,7 +98,7 @@ func TestAcquire_DoesNotRemoveLockOnEPERM(t *testing.T) {
 		t.Error("Acquire() should fail when lock references a process we cannot signal (EPERM)")
 	}
 
-	os.Remove(lockPath)
+	_ = os.Remove(lockPath)
 }
 
 func TestAcquireAfterRelease(t *testing.T) {

@@ -35,13 +35,13 @@ func Acquire(dir string) (*Lock, error) {
 			return nil, fmt.Errorf("acquire lock: %w", err)
 		}
 	}
-	fmt.Fprintf(f, "%d\n", os.Getpid())
+	_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
 	return &Lock{path: lockPath, file: f}, nil
 }
 
 // Release removes the lock file.
 func (l *Lock) Release() error {
-	l.file.Close()
+	_ = l.file.Close()
 	return os.Remove(l.path)
 }
 

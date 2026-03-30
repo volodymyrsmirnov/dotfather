@@ -71,7 +71,7 @@ func EncryptFile(repoPath, srcFile, dstFile string) error {
 	if err != nil {
 		return fmt.Errorf("open source: %w", err)
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 
 	return fileutil.AtomicWriteFile(dstFile, 0600, func(dst io.Writer) error {
 		w, err := age.Encrypt(dst, recipients...)

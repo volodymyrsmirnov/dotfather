@@ -37,7 +37,7 @@ func TestAcquireTwiceFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire() error: %v", err)
 	}
-	defer lk.Release()
+	defer func() { _ = lk.Release() }()
 
 	_, err = Acquire(dir)
 	if err == nil {
@@ -58,7 +58,7 @@ func TestAcquire_RemovesStaleLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire() should succeed after stale lock removal: %v", err)
 	}
-	defer lk.Release()
+	defer func() { _ = lk.Release() }()
 }
 
 func TestAcquire_DoesNotRemoveLiveLock(t *testing.T) {
@@ -116,5 +116,5 @@ func TestAcquireAfterRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-Acquire() error: %v", err)
 	}
-	defer lk2.Release()
+	defer func() { _ = lk2.Release() }()
 }

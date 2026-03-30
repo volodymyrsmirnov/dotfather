@@ -1138,12 +1138,18 @@ func TestSyncEncryptedConflictDetection(t *testing.T) {
 	// Copy the age keys to the second clone so it can encrypt.
 	identData, _ := os.ReadFile(filepath.Join(repoDir, ".age-identity"))
 	recipData, _ := os.ReadFile(filepath.Join(repoDir, ".age-recipients"))
-	os.WriteFile(filepath.Join(secondClone, ".age-identity"), identData, 0600)
-	os.WriteFile(filepath.Join(secondClone, ".age-recipients"), recipData, 0644)
+	if err := os.WriteFile(filepath.Join(secondClone, ".age-identity"), identData, 0600); err != nil {
+		t.Fatalf("write .age-identity: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(secondClone, ".age-recipients"), recipData, 0644); err != nil {
+		t.Fatalf("write .age-recipients: %v", err)
+	}
 
 	// Encrypt a different version of the secret.
 	remoteTmp := filepath.Join(t.TempDir(), "remote_secret")
-	os.WriteFile(remoteTmp, []byte("remote secret"), 0600)
+	if err := os.WriteFile(remoteTmp, []byte("remote secret"), 0600); err != nil {
+		t.Fatalf("write remote secret: %v", err)
+	}
 	if err := crypto.EncryptFile(secondClone, remoteTmp, filepath.Join(secondClone, ".secret.age")); err != nil {
 		t.Fatalf("encrypt remote secret: %v", err)
 	}

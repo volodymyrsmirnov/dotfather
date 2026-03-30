@@ -51,7 +51,7 @@ func runSync(ctx context.Context, c *cli.Command) error {
 	if err != nil {
 		return err
 	}
-	defer lk.Release()
+	defer func() { _ = lk.Release() }()
 
 	interactive := c.Bool("interactive")
 	hasRemote := git.HasRemote(ctx, r.Path())

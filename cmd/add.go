@@ -62,7 +62,7 @@ func runAdd(ctx context.Context, c *cli.Command) error {
 	if err != nil {
 		return err
 	}
-	defer lk.Release()
+	defer func() { _ = lk.Release() }()
 
 	keep := c.Bool("keep")
 	encrypt := c.Bool("encrypt")
@@ -218,7 +218,7 @@ func convertToEncrypted(ctx context.Context, r *repo.Repo, absPath, repoPath str
 	if err := os.Remove(repoPath); err != nil {
 		return fmt.Errorf("remove plaintext from repo: %w", err)
 	}
-	linker.CleanEmptyDirs(repoPath, r.Path())
+	_ = linker.CleanEmptyDirs(repoPath, r.Path())
 
 	// Stage both changes.
 	if err := git.Add(ctx, r.Path(), encRelPath); err != nil {

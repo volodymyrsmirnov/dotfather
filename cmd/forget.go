@@ -50,7 +50,7 @@ func runForget(ctx context.Context, c *cli.Command) error {
 	if err != nil {
 		return err
 	}
-	defer lk.Release()
+	defer func() { _ = lk.Release() }()
 
 	force := c.Bool("force")
 	var errors []error

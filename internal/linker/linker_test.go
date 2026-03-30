@@ -154,7 +154,7 @@ func TestCheck(t *testing.T) {
 		if err := os.Chmod(restrictedDir, 0000); err != nil {
 			t.Fatalf("chmod: %v", err)
 		}
-		t.Cleanup(func() { os.Chmod(restrictedDir, 0755) })
+		t.Cleanup(func() { _ = os.Chmod(restrictedDir, 0755) })
 
 		if got := Check(repoFile, target); got != Inaccessible {
 			t.Errorf("Check() = %v, want Inaccessible", got)

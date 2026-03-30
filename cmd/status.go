@@ -40,12 +40,13 @@ type fileStatus struct {
 type statusOutput struct {
 	Files       []fileStatus `json:"files"`
 	Total       int          `json:"total"`
-	OK          int          `json:"ok"`
-	Encrypted   int          `json:"encrypted"`
-	Broken      int          `json:"broken"`
-	Missing     int          `json:"missing"`
-	Unlinked    int          `json:"unlinked"`
-	Conflict    int          `json:"conflict"`
+	OK           int          `json:"ok"`
+	Encrypted    int          `json:"encrypted"`
+	Broken       int          `json:"broken"`
+	Missing      int          `json:"missing"`
+	Unlinked     int          `json:"unlinked"`
+	Conflict     int          `json:"conflict"`
+	Inaccessible int          `json:"inaccessible,omitempty"`
 	Uncommitted bool         `json:"uncommitted"`
 	Ahead       int          `json:"ahead,omitempty"`
 	Behind      int          `json:"behind,omitempty"`
@@ -124,6 +125,8 @@ func runStatus(ctx context.Context, c *cli.Command) error {
 			output.Unlinked++
 		case linker.Conflict.String():
 			output.Conflict++
+		case linker.Inaccessible.String():
+			output.Inaccessible++
 		case "ENCRYPTED", "ENCRYPTED (missing)":
 			output.Encrypted++
 		}
@@ -186,6 +189,9 @@ func runStatus(ctx context.Context, c *cli.Command) error {
 	}
 	if output.Conflict > 0 {
 		summary += fmt.Sprintf(", %d conflict", output.Conflict)
+	}
+	if output.Inaccessible > 0 {
+		summary += fmt.Sprintf(", %d inaccessible", output.Inaccessible)
 	}
 	fmt.Println(summary)
 

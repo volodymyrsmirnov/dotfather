@@ -176,6 +176,26 @@ func TestCheck(t *testing.T) {
 			t.Errorf("Check() = %v, want Broken", got)
 		}
 	})
+
+	t.Run("Inaccessible", func(t *testing.T) {
+		if os.Getuid() == 0 {
+			t.Skip("test requires non-root")
+		}
+		restrictedDir := filepath.Join(targetDir, "noperm")
+		if err := os.MkdirAll(restrictedDir, 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		target := filepath.Join(restrictedDir, "secret")
+		setupFile(t, target, "hidden")
+		if err := os.Chmod(restrictedDir, 0000); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		t.Cleanup(func() { os.Chmod(restrictedDir, 0755) })
+
+		if got := Check(repoFile, target); got != Inaccessible {
+			t.Errorf("Check() = %v, want Inaccessible", got)
+		}
+	})
 }
 
 func TestIsOurSymlink(t *testing.T) {

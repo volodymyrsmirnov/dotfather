@@ -79,6 +79,28 @@ func TestAcquire_DoesNotRemoveLiveLock(t *testing.T) {
 	os.Remove(lockPath)
 }
 
+func TestAcquire_DoesNotRemoveLockOnEPERM(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("test requires non-root (Signal(0) against PID 1 must return EPERM)")
+	}
+
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, ".lock")
+
+	// PID 1 (init/launchd) is always alive and owned by root. Signal(0) from
+	// a non-root process returns EPERM, which should be treated as "alive".
+	if err := os.WriteFile(lockPath, []byte("1\n"), 0600); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+
+	_, err := Acquire(dir)
+	if err == nil {
+		t.Error("Acquire() should fail when lock references a process we cannot signal (EPERM)")
+	}
+
+	os.Remove(lockPath)
+}
+
 func TestAcquireAfterRelease(t *testing.T) {
 	dir := t.TempDir()
 

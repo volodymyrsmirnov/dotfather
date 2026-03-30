@@ -115,10 +115,23 @@ func AddAll(ctx context.Context, dir string) error {
 	return err
 }
 
+// hasUserConfig returns true if git user.name is configured (global or local).
+func hasUserConfig(ctx context.Context, dir string) bool {
+	_, err := run(ctx, dir, "config", "user.name")
+	return err == nil
+}
+
 // Commit creates a commit with the given message.
 // Signing is disabled to avoid depending on the caller's GPG/SSH agent.
+// If no git user identity is configured, a fallback author is used so that
+// commits succeed on fresh machines without global git config.
 func Commit(ctx context.Context, dir, message string) error {
-	_, err := run(ctx, dir, "-c", "commit.gpgsign=false", "commit", "-m", message)
+	args := []string{"-c", "commit.gpgsign=false"}
+	if !hasUserConfig(ctx, dir) {
+		args = append(args, "-c", "user.name=dotfather", "-c", "user.email=dotfather@localhost")
+	}
+	args = append(args, "commit", "-m", message)
+	_, err := run(ctx, dir, args...)
 	return err
 }
 
@@ -198,13 +211,17 @@ func ConflictedFiles(ctx context.Context, dir string) ([]string, error) {
 	return strings.Split(trimmed, "\n"), nil
 }
 
-// CheckoutOurs checks out the local version of a conflicting file.
+// CheckoutOurs checks out the --ours version of a conflicting file.
+// During rebase (used by dotfather sync), --ours is the upstream branch
+// being rebased onto, i.e. the remote version.
 func CheckoutOurs(ctx context.Context, dir, path string) error {
 	_, err := run(ctx, dir, "checkout", "--ours", "--", path)
 	return err
 }
 
-// CheckoutTheirs checks out the remote version of a conflicting file.
+// CheckoutTheirs checks out the --theirs version of a conflicting file.
+// During rebase (used by dotfather sync), --theirs is the local commit
+// being replayed, i.e. the local version.
 func CheckoutTheirs(ctx context.Context, dir, path string) error {
 	_, err := run(ctx, dir, "checkout", "--theirs", "--", path)
 	return err

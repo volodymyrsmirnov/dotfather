@@ -3,12 +3,15 @@ package cmd
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/volodymyrsmirnov/dotfather/internal/crypto"
+	"github.com/volodymyrsmirnov/dotfather/internal/git"
 	"github.com/volodymyrsmirnov/dotfather/internal/linker"
+	"github.com/volodymyrsmirnov/dotfather/internal/repo"
 	"github.com/volodymyrsmirnov/dotfather/testutil"
 )
 
@@ -1003,5 +1006,197 @@ func TestConvertToEncrypted(t *testing.T) {
 	// Plain file should NOT exist in repo.
 	if _, err := os.Stat(filepath.Join(repoDir, ".secret")); !os.IsNotExist(err) {
 		t.Error("plain file should be removed from repo after conversion")
+	}
+}
+
+func runGitCmd(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+}
+
+func TestResolveConflicts_AcceptLocal_DuringRebase(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	ctx := context.Background()
+
+	// Create a bare "remote" repo.
+	remoteDir := resolvedTempDir(t)
+	runGitCmd(t, remoteDir, "init", "--bare")
+
+	// Clone remote into dotfather repo location.
+	repoDir := filepath.Join(home, ".dotfather")
+	runGitCmd(t, home, "clone", remoteDir, repoDir)
+	runGitCmd(t, repoDir, "config", "user.email", "test@test.com")
+	runGitCmd(t, repoDir, "config", "user.name", "Test")
+
+	// Create a file, commit, push.
+	conflictFile := ".config/app/config.yaml"
+	testutil.CreateFile(t, repoDir, conflictFile, "original content")
+	runGitCmd(t, repoDir, "add", ".")
+	runGitCmd(t, repoDir, "commit", "-m", "initial")
+	runGitCmd(t, repoDir, "push", "origin", "HEAD")
+
+	// Simulate remote change: clone the remote again, modify the file, push.
+	secondClone := resolvedTempDir(t)
+	runGitCmd(t, home, "clone", remoteDir, secondClone)
+	runGitCmd(t, secondClone, "config", "user.email", "other@test.com")
+	runGitCmd(t, secondClone, "config", "user.name", "Other")
+	if err := os.WriteFile(filepath.Join(secondClone, conflictFile), []byte("remote change"), 0644); err != nil {
+		t.Fatalf("write remote change: %v", err)
+	}
+	runGitCmd(t, secondClone, "add", ".")
+	runGitCmd(t, secondClone, "commit", "-m", "remote edit")
+	runGitCmd(t, secondClone, "push", "origin", "HEAD")
+
+	// Now make a divergent local change.
+	if err := os.WriteFile(filepath.Join(repoDir, conflictFile), []byte("local change"), 0644); err != nil {
+		t.Fatalf("write local change: %v", err)
+	}
+	runGitCmd(t, repoDir, "add", ".")
+	runGitCmd(t, repoDir, "commit", "-m", "local edit")
+
+	// Pull --rebase will now conflict. Start the pull manually.
+	pullCmd := exec.Command("git", "pull", "--rebase", "origin", "HEAD")
+	pullCmd.Dir = repoDir
+	_ = pullCmd.Run() // expected to fail with conflict
+
+	// Verify there is a conflict.
+	conflicted, err := git.ConflictedFiles(ctx, repoDir)
+	if err != nil {
+		t.Fatalf("ConflictedFiles: %v", err)
+	}
+	if len(conflicted) == 0 {
+		t.Fatal("expected a rebase conflict")
+	}
+
+	// Resolve with "l" (accept local). Provide input via io.Reader.
+	r, _ := repo.New()
+	input := strings.NewReader("l\n")
+	if err := resolveConflicts(ctx, r, conflicted, input); err != nil {
+		t.Fatalf("resolveConflicts: %v", err)
+	}
+
+	// The file should now contain the LOCAL content, not the remote content.
+	content, err := os.ReadFile(filepath.Join(repoDir, conflictFile))
+	if err != nil {
+		t.Fatalf("read resolved file: %v", err)
+	}
+	if got := string(content); got != "local change" {
+		t.Errorf("after accepting local: content = %q, want %q", got, "local change")
+	}
+}
+
+func TestSyncEncryptedConflictDetection(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	ctx := context.Background()
+
+	// Set up a non-bare "remote" repo with an initial commit so branch exists.
+	remoteDir := resolvedTempDir(t)
+	testutil.InitGitRepo(t, remoteDir)
+
+	// Clone remote into dotfather repo location.
+	repoDir := filepath.Join(home, ".dotfather")
+	runGitCmd(t, home, "clone", remoteDir, repoDir)
+	runGitCmd(t, repoDir, "config", "user.email", "test@test.com")
+	runGitCmd(t, repoDir, "config", "user.name", "Test")
+	// Allow pushes to checked-out branch on the remote.
+	runGitCmd(t, remoteDir, "config", "receive.denyCurrentBranch", "ignore")
+
+	// Generate encryption keys.
+	if err := crypto.GenerateKey(repoDir); err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	// Create a secret file and encrypt it into the repo.
+	secretPath := filepath.Join(home, ".secret")
+	testutil.CreateFile(t, home, ".secret", "original secret")
+
+	app := NewApp()
+	if err := app.Run(ctx, []string{"dotfather", "add", "--encrypt", secretPath}); err != nil {
+		t.Fatalf("add --encrypt: %v", err)
+	}
+
+	// Commit and push.
+	runGitCmd(t, repoDir, "add", ".")
+	runGitCmd(t, repoDir, "commit", "-m", "add encrypted secret")
+	branch, err := git.CurrentBranch(ctx, repoDir)
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	runGitCmd(t, repoDir, "push", "origin", branch)
+
+	// Simulate remote change: clone again, re-encrypt with different content, push.
+	secondClone := resolvedTempDir(t)
+	runGitCmd(t, home, "clone", remoteDir, secondClone)
+	runGitCmd(t, secondClone, "config", "user.email", "other@test.com")
+	runGitCmd(t, secondClone, "config", "user.name", "Other")
+
+	// Copy the age keys to the second clone so it can encrypt.
+	identData, _ := os.ReadFile(filepath.Join(repoDir, ".age-identity"))
+	recipData, _ := os.ReadFile(filepath.Join(repoDir, ".age-recipients"))
+	os.WriteFile(filepath.Join(secondClone, ".age-identity"), identData, 0600)
+	os.WriteFile(filepath.Join(secondClone, ".age-recipients"), recipData, 0644)
+
+	// Encrypt a different version of the secret.
+	remoteTmp := filepath.Join(t.TempDir(), "remote_secret")
+	os.WriteFile(remoteTmp, []byte("remote secret"), 0600)
+	if err := crypto.EncryptFile(secondClone, remoteTmp, filepath.Join(secondClone, ".secret.age")); err != nil {
+		t.Fatalf("encrypt remote secret: %v", err)
+	}
+	runGitCmd(t, secondClone, "add", ".secret.age")
+	runGitCmd(t, secondClone, "commit", "-m", "update encrypted secret from remote")
+	runGitCmd(t, secondClone, "push", "origin", branch)
+
+	// Now modify the local plaintext (simulating local edits).
+	if err := os.WriteFile(secretPath, []byte("local secret edit"), 0600); err != nil {
+		t.Fatalf("write local edit: %v", err)
+	}
+
+	// Snapshot hashes and detect local edits BEFORE pull.
+	r, err := repo.New()
+	if err != nil {
+		t.Fatalf("repo.New: %v", err)
+	}
+	preAgeHashes := hashAgeFiles(r)
+	localEdits := detectLocalEdits(r)
+
+	// Pull from remote (should update .secret.age without conflict).
+	if _, pullErr := git.Pull(ctx, repoDir, branch); pullErr != nil {
+		t.Fatalf("pull should succeed (only .age changed on remote): %v", pullErr)
+	}
+
+	// Detect encrypted conflicts.
+	encConflicts := detectEncryptedConflicts(r, preAgeHashes, localEdits)
+
+	if !encConflicts[".secret.age"] {
+		t.Fatal("expected encrypted conflict for .secret.age")
+	}
+
+	// Verify the local backup was created.
+	backupPath := secretPath + ".dotfather-local"
+	backupContent, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("backup should exist: %v", err)
+	}
+	if string(backupContent) != "local secret edit" {
+		t.Errorf("backup content = %q, want %q", backupContent, "local secret edit")
+	}
+
+	// Decrypt (remote wins).
+	if err := decryptEncryptedFiles(r, encConflicts, preAgeHashes); err != nil {
+		t.Fatalf("decryptEncryptedFiles: %v", err)
+	}
+
+	// The plaintext should now contain the remote version.
+	content, err := os.ReadFile(secretPath)
+	if err != nil {
+		t.Fatalf("read decrypted secret: %v", err)
+	}
+	if string(content) != "remote secret" {
+		t.Errorf("decrypted content = %q, want %q", content, "remote secret")
 	}
 }

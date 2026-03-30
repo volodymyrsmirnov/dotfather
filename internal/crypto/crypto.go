@@ -125,6 +125,31 @@ func DecryptFile(repoPath, srcFile, dstFile string) error {
 	})
 }
 
+// DecryptToBytes decrypts srcFile and returns the plaintext content in memory.
+func DecryptToBytes(repoPath, srcFile string) ([]byte, error) {
+	identities, err := loadIdentities(repoPath)
+	if err != nil {
+		return nil, err
+	}
+
+	f, err := os.Open(srcFile)
+	if err != nil {
+		return nil, fmt.Errorf("open encrypted file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	r, err := age.Decrypt(f, identities...)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt: %w", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		return nil, fmt.Errorf("read decrypted data: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
 // IsEncrypted returns true if the repo-relative path has the .age extension.
 func IsEncrypted(relPath string) bool {
 	return strings.HasSuffix(relPath, EncryptedExt)

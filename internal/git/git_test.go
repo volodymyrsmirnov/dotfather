@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -303,6 +304,35 @@ func TestCommit_NoSigning(t *testing.T) {
 
 	if err := Commit(context.Background(), dir, "should not require signing"); err != nil {
 		t.Fatalf("Commit() error with gpgsign=true: %v", err)
+	}
+}
+
+func TestCommit_FallbackIdentity(t *testing.T) {
+	dir := t.TempDir()
+
+	// Isolate from any global git config.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+
+	// Init repo WITHOUT setting user.name/email.
+	runTestGit(t, dir, "init")
+	writeTestFile(t, filepath.Join(dir, "file.txt"), "content")
+	runTestGit(t, dir, "add", ".")
+
+	// Commit should succeed using the fallback identity.
+	ctx := context.Background()
+	if err := Commit(ctx, dir, "test fallback identity"); err != nil {
+		t.Fatalf("Commit() should succeed without user config: %v", err)
+	}
+
+	// Verify the commit author is the fallback.
+	out, err := run(ctx, dir, "log", "-1", "--format=%an <%ae>")
+	if err != nil {
+		t.Fatalf("git log: %v", err)
+	}
+	if got := strings.TrimSpace(out); got != "dotfather <dotfather@localhost>" {
+		t.Errorf("commit author = %q, want %q", got, "dotfather <dotfather@localhost>")
 	}
 }
 

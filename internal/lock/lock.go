@@ -1,6 +1,7 @@
 package lock
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -59,8 +60,13 @@ func removeStaleLock(lockPath string) bool {
 	if err != nil {
 		return false
 	}
-	if err := proc.Signal(syscall.Signal(0)); err == nil {
+	err = proc.Signal(syscall.Signal(0))
+	if err == nil {
 		return false // process is alive
+	}
+	// EPERM means the process exists but we lack permission to signal it.
+	if errors.Is(err, syscall.EPERM) {
+		return false
 	}
 	return os.Remove(lockPath) == nil
 }

@@ -318,7 +318,7 @@ func addFile(ctx context.Context, r *repo.Repo, absPath string, keep, force bool
 			}
 			fmt.Printf("Re-linked %s\n", pathutil.TildePath(absPath))
 			return nil
-		case linker.Unlinked, linker.Conflict:
+		case linker.Unlinked, linker.Conflict, linker.Inaccessible:
 			if !force {
 				return fmt.Errorf("file exists at %s (%s); use --force to overwrite",
 					pathutil.TildePath(absPath), state.String())

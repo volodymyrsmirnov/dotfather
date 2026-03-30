@@ -11,11 +11,12 @@ import (
 type LinkState int
 
 const (
-	OK       LinkState = iota // Symlink exists and points to repo file.
-	Broken                    // Symlink exists but target is missing.
-	Missing                   // No symlink and no file at target.
-	Unlinked                  // Regular file exists at target (not a symlink to repo).
-	Conflict                  // Symlink exists but points somewhere else.
+	OK           LinkState = iota // Symlink exists and points to repo file.
+	Broken                       // Symlink exists but target is missing.
+	Missing                      // No symlink and no file at target.
+	Unlinked                     // Regular file exists at target (not a symlink to repo).
+	Conflict                     // Symlink exists but points somewhere else.
+	Inaccessible                 // Cannot stat target (permission error).
 )
 
 func (s LinkState) String() string {
@@ -30,6 +31,8 @@ func (s LinkState) String() string {
 		return "UNLINKED"
 	case Conflict:
 		return "CONFLICT"
+	case Inaccessible:
+		return "INACCESSIBLE"
 	default:
 		return "UNKNOWN"
 	}
@@ -78,7 +81,7 @@ func Check(repoFile, targetPath string) LinkState {
 		if os.IsNotExist(err) {
 			return Missing
 		}
-		return Missing
+		return Inaccessible
 	}
 
 	// Target exists. Is it a symlink?

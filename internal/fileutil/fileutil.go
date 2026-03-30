@@ -82,3 +82,9 @@ func FileHash(path string) (string, error) {
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
+
+// BytesHash returns the hex-encoded SHA-256 hash of a byte slice.
+func BytesHash(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}

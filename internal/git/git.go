@@ -224,9 +224,15 @@ func CheckoutTheirs(ctx context.Context, dir, path string) error {
 
 // RebaseContinue continues a rebase in progress.
 // Sets GIT_EDITOR=true to prevent editor prompts and disables commit signing
-// to match the behavior of Commit().
+// to match the behavior of Commit(). Falls back to a default author identity
+// when no git user is configured.
 func RebaseContinue(ctx context.Context, dir string) error {
-	cmd := exec.CommandContext(ctx, "git", "-c", "commit.gpgsign=false", "rebase", "--continue")
+	args := []string{"-c", "commit.gpgsign=false"}
+	if !hasUserConfig(ctx, dir) {
+		args = append(args, "-c", "user.name=dotfather", "-c", "user.email=dotfather@localhost")
+	}
+	args = append(args, "rebase", "--continue")
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_EDITOR=true")
 
@@ -242,7 +248,7 @@ func RebaseContinue(ctx context.Context, dir string) error {
 		}
 		return &GitError{
 			Command:  "rebase",
-			Args:     []string{"-c", "commit.gpgsign=false", "rebase", "--continue"},
+			Args:     args,
 			Stderr:   stderr.String(),
 			ExitCode: exitCode,
 		}

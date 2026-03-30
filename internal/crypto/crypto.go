@@ -10,6 +10,8 @@ import (
 
 	"filippo.io/age"
 	"filippo.io/age/agessh"
+
+	"github.com/volodymyrsmirnov/dotfather/internal/fileutil"
 )
 
 const (
@@ -57,9 +59,10 @@ func HasIdentity(repoPath string) bool {
 }
 
 // EncryptFile encrypts srcFile and writes the result to dstFile,
-// using the recipient from the repo's .age-recipients file.
+// using all recipients from the repo's .age-recipients file.
+// The write is atomic: a temp file is used and renamed into place.
 func EncryptFile(repoPath, srcFile, dstFile string) error {
-	recipient, err := loadRecipient(repoPath)
+	recipients, err := loadRecipients(repoPath)
 	if err != nil {
 		return err
 	}
@@ -70,36 +73,25 @@ func EncryptFile(repoPath, srcFile, dstFile string) error {
 	}
 	defer src.Close()
 
-	if err := os.MkdirAll(filepath.Dir(dstFile), 0755); err != nil {
-		return fmt.Errorf("create parent dirs: %w", err)
-	}
-
-	dst, err := os.OpenFile(dstFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-	if err != nil {
-		return fmt.Errorf("create output: %w", err)
-	}
-
-	w, err := age.Encrypt(dst, recipient)
-	if err != nil {
-		_ = dst.Close()
-		return fmt.Errorf("encrypt: %w", err)
-	}
-
-	if _, err := io.Copy(w, src); err != nil {
-		_ = dst.Close()
-		return fmt.Errorf("write encrypted data: %w", err)
-	}
-
-	if err := w.Close(); err != nil {
-		_ = dst.Close()
-		return fmt.Errorf("finalize encryption: %w", err)
-	}
-
-	return dst.Close()
+	return fileutil.AtomicWriteFile(dstFile, 0600, func(dst io.Writer) error {
+		w, err := age.Encrypt(dst, recipients...)
+		if err != nil {
+			return fmt.Errorf("encrypt: %w", err)
+		}
+		if _, err := io.Copy(w, src); err != nil {
+			return fmt.Errorf("write encrypted data: %w", err)
+		}
+		if err := w.Close(); err != nil {
+			return fmt.Errorf("finalize encryption: %w", err)
+		}
+		return nil
+	})
 }
 
 // DecryptFile decrypts srcFile and writes the result to dstFile,
 // using the identity from the repo's .age-identity file.
+// The write is atomic (temp file + rename) and rejects symlinks at the
+// destination to prevent decrypted secrets from leaking through a symlink.
 func DecryptFile(repoPath, srcFile, dstFile string) error {
 	identities, err := loadIdentities(repoPath)
 	if err != nil {
@@ -117,26 +109,20 @@ func DecryptFile(repoPath, srcFile, dstFile string) error {
 		return fmt.Errorf("decrypt: %w", err)
 	}
 
-	plaintext, err := io.ReadAll(r)
-	if err != nil {
-		return fmt.Errorf("read decrypted data: %w", err)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(dstFile), 0755); err != nil {
-		return fmt.Errorf("create parent dirs: %w", err)
-	}
-
 	// Preserve existing file permissions; default to 0600 for new files.
 	mode := os.FileMode(0600)
-	if info, err := os.Stat(dstFile); err == nil {
-		mode = info.Mode().Perm()
+	if info, statErr := os.Lstat(dstFile); statErr == nil {
+		if info.Mode().IsRegular() {
+			mode = info.Mode().Perm()
+		}
 	}
 
-	if err := os.WriteFile(dstFile, plaintext, mode); err != nil {
-		return fmt.Errorf("write decrypted file: %w", err)
-	}
-
-	return nil
+	return fileutil.SafeWriteTarget(dstFile, mode, func(dst io.Writer) error {
+		if _, err := io.Copy(dst, r); err != nil {
+			return fmt.Errorf("write decrypted data: %w", err)
+		}
+		return nil
+	})
 }
 
 // IsEncrypted returns true if the repo-relative path has the .age extension.
@@ -154,32 +140,37 @@ func EncryptedPath(relPath string) string {
 	return relPath + EncryptedExt
 }
 
-func loadRecipient(repoPath string) (age.Recipient, error) {
+func loadRecipients(repoPath string) ([]age.Recipient, error) {
 	data, err := os.ReadFile(filepath.Join(repoPath, RecipientFile))
 	if err != nil {
 		return nil, fmt.Errorf("read recipient file: %w (run 'dotfather init' to generate keys)", err)
 	}
 
-	line := strings.TrimSpace(string(data))
-	if line == "" {
+	content := strings.TrimSpace(string(data))
+	if content == "" {
 		return nil, fmt.Errorf("recipient file is empty")
 	}
 
-	// Take first non-comment line; try X25519, then SSH public key.
-	for _, l := range strings.Split(line, "\n") {
+	var recipients []age.Recipient
+	for _, l := range strings.Split(content, "\n") {
 		l = strings.TrimSpace(l)
 		if l == "" || strings.HasPrefix(l, "#") {
 			continue
 		}
 		if r, err := age.ParseX25519Recipient(l); err == nil {
-			return r, nil
+			recipients = append(recipients, r)
+			continue
 		}
 		if r, err := agessh.ParseRecipient(l); err == nil {
-			return r, nil
+			recipients = append(recipients, r)
+			continue
 		}
 	}
 
-	return nil, fmt.Errorf("no recipient found in %s", RecipientFile)
+	if len(recipients) == 0 {
+		return nil, fmt.Errorf("no recipients found in %s", RecipientFile)
+	}
+	return recipients, nil
 }
 
 func loadIdentities(repoPath string) ([]age.Identity, error) {

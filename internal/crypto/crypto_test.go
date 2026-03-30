@@ -334,6 +334,65 @@ func TestEncryptDecryptRoundtrip_EmptyFile(t *testing.T) {
 	}
 }
 
+func TestDecryptFile_RefusesSymlinkDestination(t *testing.T) {
+	dir := t.TempDir()
+	if err := GenerateKey(dir); err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	srcFile := filepath.Join(dir, "secret.txt")
+	if err := os.WriteFile(srcFile, []byte("secret data"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	encFile := filepath.Join(dir, "secret.txt.age")
+	if err := EncryptFile(dir, srcFile, encFile); err != nil {
+		t.Fatalf("EncryptFile: %v", err)
+	}
+
+	// Place a symlink at the decrypt destination pointing to a trap file.
+	trapFile := filepath.Join(dir, "trap.txt")
+	if err := os.WriteFile(trapFile, []byte("should not change"), 0644); err != nil {
+		t.Fatalf("write trap: %v", err)
+	}
+
+	dstFile := filepath.Join(dir, "output.txt")
+	if err := os.Symlink(trapFile, dstFile); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	// Decrypt should succeed but write to the path, not follow the symlink.
+	if err := DecryptFile(dir, encFile, dstFile); err != nil {
+		t.Fatalf("DecryptFile: %v", err)
+	}
+
+	// The trap file should be unchanged.
+	trapData, err := os.ReadFile(trapFile)
+	if err != nil {
+		t.Fatalf("read trap: %v", err)
+	}
+	if string(trapData) != "should not change" {
+		t.Errorf("trap file was modified: got %q", trapData)
+	}
+
+	// dstFile should now be a regular file (symlink removed).
+	info, err := os.Lstat(dstFile)
+	if err != nil {
+		t.Fatalf("lstat dst: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Error("destination should no longer be a symlink")
+	}
+
+	decrypted, err := os.ReadFile(dstFile)
+	if err != nil {
+		t.Fatalf("read decrypted: %v", err)
+	}
+	if string(decrypted) != "secret data" {
+		t.Errorf("decrypted = %q, want %q", decrypted, "secret data")
+	}
+}
+
 func TestEncryptDecryptRoundtrip_BinaryData(t *testing.T) {
 	dir := t.TempDir()
 	if err := GenerateKey(dir); err != nil {

@@ -234,6 +234,43 @@ func TestTargetPathFor(t *testing.T) {
 	}
 }
 
+func TestManagedFiles_ExcludesSymlinks(t *testing.T) {
+	home := testutil.SetupTestHome(t)
+	repoDir := filepath.Join(home, ".dotfather")
+	testutil.InitGitRepo(t, repoDir)
+
+	// Create a regular file and a symlink in the repo.
+	testutil.CreateFile(t, repoDir, ".bashrc", "# bash")
+	target := filepath.Join(repoDir, ".bashrc")
+	link := filepath.Join(repoDir, ".bashrc-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	r, _ := New()
+
+	files, err := r.ManagedFiles()
+	if err != nil {
+		t.Fatalf("ManagedFiles() error: %v", err)
+	}
+
+	for _, f := range files {
+		if f == ".bashrc-link" {
+			t.Error("ManagedFiles() should exclude symlinks in the repo")
+		}
+	}
+
+	found := false
+	for _, f := range files {
+		if f == ".bashrc" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("ManagedFiles() should still include regular files")
+	}
+}
+
 func TestIsManaged(t *testing.T) {
 	home := testutil.SetupTestHome(t)
 	repoDir := filepath.Join(home, ".dotfather")

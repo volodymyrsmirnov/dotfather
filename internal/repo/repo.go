@@ -16,11 +16,12 @@ import (
 
 // metaFiles are repo files that should not be symlinked to ~.
 var metaFiles = map[string]bool{
-	"README.md":            true,
-	".gitignore":           true,
-	".dotfather-ignore":    true,
-	crypto.RecipientFile:   true,
-	crypto.IdentityFile:    true,
+	"README.md":          true,
+	".gitignore":         true,
+	".dotfather-ignore":  true,
+	".lock":              true,
+	crypto.RecipientFile: true,
+	crypto.IdentityFile:  true,
 }
 
 const defaultDirName = ".dotfather"
@@ -109,6 +110,11 @@ func (r *Repo) ManagedFiles() ([]string, error) {
 			return filepath.SkipDir
 		}
 		if !d.IsDir() {
+			// Reject symlinks in the repo — a malicious repo could
+			// commit symlinks that project arbitrary targets into ~.
+			if d.Type()&os.ModeSymlink != 0 {
+				return nil
+			}
 			rel, err := filepath.Rel(r.path, path)
 			if err != nil {
 				return err

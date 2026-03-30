@@ -11,6 +11,7 @@ import (
 	cli "github.com/urfave/cli/v3"
 
 	"github.com/volodymyrsmirnov/dotfather/internal/crypto"
+	"github.com/volodymyrsmirnov/dotfather/internal/fileutil"
 	"github.com/volodymyrsmirnov/dotfather/internal/git"
 	"github.com/volodymyrsmirnov/dotfather/internal/linker"
 	"github.com/volodymyrsmirnov/dotfather/internal/lock"
@@ -340,25 +341,42 @@ func addFile(ctx context.Context, r *repo.Repo, absPath string, keep, force bool
 	}
 
 	if keep {
-		// Copy to repo, rename original to .bak, create symlink.
+		// Copy to repo, create symlink at temp path, backup original, swap in symlink.
 		if err := linker.CopyFile(absPath, repoPath); err != nil {
 			return fmt.Errorf("copy to repo: %w", err)
 		}
-		bakPath := absPath + ".bak"
+		tmpLink := absPath + ".dotfather-link"
+		if err := linker.Link(repoPath, tmpLink); err != nil {
+			_ = os.Remove(repoPath)
+			return fmt.Errorf("create symlink: %w", err)
+		}
+		bakPath := fileutil.UniqueBackupPath(absPath, ".bak")
 		if err := os.Rename(absPath, bakPath); err != nil {
+			_ = os.Remove(tmpLink)
+			_ = os.Remove(repoPath)
 			return fmt.Errorf("create backup: %w", err)
 		}
-		if err := linker.Link(repoPath, absPath); err != nil {
-			return fmt.Errorf("create symlink: %w", err)
+		if err := os.Rename(tmpLink, absPath); err != nil {
+			_ = os.Rename(bakPath, absPath) // restore original
+			_ = os.Remove(tmpLink)
+			_ = os.Remove(repoPath)
+			return fmt.Errorf("replace original with symlink: %w", err)
 		}
 		fmt.Printf("Added %s (backup at %s)\n", pathutil.TildePath(absPath), pathutil.TildePath(bakPath))
 	} else {
-		// Move to repo, create symlink.
-		if err := linker.MoveFile(absPath, repoPath); err != nil {
-			return fmt.Errorf("move to repo: %w", err)
+		// Copy to repo, create symlink at temp path, atomically replace original.
+		if err := linker.CopyFile(absPath, repoPath); err != nil {
+			return fmt.Errorf("copy to repo: %w", err)
 		}
-		if err := linker.Link(repoPath, absPath); err != nil {
+		tmpLink := absPath + ".dotfather-link"
+		if err := linker.Link(repoPath, tmpLink); err != nil {
+			_ = os.Remove(repoPath)
 			return fmt.Errorf("create symlink: %w", err)
+		}
+		if err := os.Rename(tmpLink, absPath); err != nil {
+			_ = os.Remove(tmpLink)
+			_ = os.Remove(repoPath)
+			return fmt.Errorf("replace original with symlink: %w", err)
 		}
 		fmt.Printf("Added %s\n", pathutil.TildePath(absPath))
 	}

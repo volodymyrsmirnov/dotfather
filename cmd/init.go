@@ -10,6 +10,7 @@ import (
 	cli "github.com/urfave/cli/v3"
 
 	"github.com/volodymyrsmirnov/dotfather/internal/crypto"
+	"github.com/volodymyrsmirnov/dotfather/internal/fileutil"
 	"github.com/volodymyrsmirnov/dotfather/internal/git"
 	"github.com/volodymyrsmirnov/dotfather/internal/linker"
 	"github.com/volodymyrsmirnov/dotfather/internal/pathutil"
@@ -79,12 +80,15 @@ func initFresh(ctx context.Context, r *repo.Repo) error {
 		return fmt.Errorf("write README: %w", err)
 	}
 
-	// Stage meta files.
+	// Stage meta files and create initial commit.
 	if err := git.Add(ctx, r.Path(), ".gitignore", crypto.RecipientFile, "README.md"); err != nil {
 		return fmt.Errorf("git add: %w", err)
 	}
+	if err := git.Commit(ctx, r.Path(), "Initialize dotfather repository"); err != nil {
+		return fmt.Errorf("git commit: %w", err)
+	}
 
-	fmt.Printf("Initialized empty dotfather repository at %s\n", pathutil.TildePath(r.Path()))
+	fmt.Printf("Initialized dotfather repository at %s\n", pathutil.TildePath(r.Path()))
 	return nil
 }
 
@@ -145,7 +149,7 @@ func initFromClone(ctx context.Context, r *repo.Repo, url string) error {
 
 			// Back up existing target before decrypting over it.
 			if _, err := os.Lstat(targetPath); err == nil {
-				backupPath := targetPath + ".dotfather-backup"
+				backupPath := fileutil.UniqueBackupPath(targetPath, ".dotfather-backup")
 				if err := os.Rename(targetPath, backupPath); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: could not back up %s: %v\n",
 						pathutil.TildePath(targetPath), err)
@@ -181,7 +185,7 @@ func initFromClone(ctx context.Context, r *repo.Repo, url string) error {
 		}
 
 		if _, err := os.Lstat(targetPath); err == nil {
-			backupPath := targetPath + ".dotfather-backup"
+			backupPath := fileutil.UniqueBackupPath(targetPath, ".dotfather-backup")
 			if err := os.Rename(targetPath, backupPath); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: could not back up %s: %v\n",
 					pathutil.TildePath(targetPath), err)
